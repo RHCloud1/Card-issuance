@@ -121,6 +121,7 @@ APP_NAME=Card Issuance
 APP_SECRET=替换为一段很长的随机字符串
 APP_BASE_URL=https://你的域名
 DATABASE_PATH=/data/card_issuance.sqlite3
+ADMIN_PATH=/替换成你自己的后台路径
 ADMIN_USERNAME=你的后台邮箱
 ADMIN_PASSWORD=你的后台强密码
 ORDER_EXPIRE_MINUTES=15
@@ -142,7 +143,7 @@ chmod +x scripts/deploy.sh
 访问：
 
 - 前台：`http://服务器IP:8080/`
-- 后台：`http://服务器IP:8080/aichishi/login`
+- 后台：`http://服务器IP:8080` + `.env` 中的 `ADMIN_PATH` + `/login`
 
 ## 宝塔或 Nginx 反向代理
 
@@ -252,6 +253,28 @@ Windows PowerShell：
 - 密码：`admin-dev-password`
 
 生产账号密码不要写入代码仓库，应通过 `.env` 设置。
+
+## 后台路径安全
+
+后台路径不要写死在代码或公开文档里。项目通过 `.env` 的 `ADMIN_PATH` 配置后台入口：
+
+```env
+ADMIN_PATH=/替换成你自己的后台路径
+```
+
+后台登录地址为：
+
+```text
+https://你的域名 + ADMIN_PATH + /login
+```
+
+示例：如果 `ADMIN_PATH=/my-panel-2026`，后台就是：
+
+```text
+https://你的域名/my-panel-2026/login
+```
+
+不要把真实 `ADMIN_PATH` 提交到 Git。生产服务器只需要把它写在 `.env` 里。隐藏后台路径只能减少扫描噪音，不能替代强密码、HTTPS、备份、最小权限和必要的访问控制。
 
 ## 支付接入策略
 

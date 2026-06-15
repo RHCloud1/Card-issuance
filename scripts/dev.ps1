@@ -18,6 +18,7 @@ if (!(Test-Path ".venv")) {
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 $env:APP_SECRET = "dev-secret"
 $env:DATABASE_PATH = "$PWD\data\dev.sqlite3"
+$env:ADMIN_PATH = "/admin-local"
 $env:ADMIN_USERNAME = "admin@example.com"
 $env:ADMIN_PASSWORD = "admin-dev-password"
 .\.venv\Scripts\python.exe -m flask --app "app:create_app()" run --host 127.0.0.1 --port 8080 --debug

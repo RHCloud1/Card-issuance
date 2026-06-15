@@ -34,8 +34,10 @@ def create_app() -> Flask:
             "DATABASE_PATH",
             str(Path.cwd() / "data" / "card_issuance.sqlite3"),
         ),
+        ADMIN_PATH=normalize_admin_path(os.getenv("ADMIN_PATH", "/admin")),
         ORDER_EXPIRE_MINUTES=int(os.getenv("ORDER_EXPIRE_MINUTES", "15")),
     )
+    admin_path = app.config["ADMIN_PATH"]
 
     app.teardown_appcontext(close_db)
     app.jinja_env.filters["yuan"] = cents_to_yuan
@@ -261,7 +263,7 @@ def create_app() -> Flask:
                 return redirect(url_for("ticket_new"))
         return render_template("ticket_form.html")
 
-    @app.route("/aichishi/login", methods=["GET", "POST"])
+    @app.route(f"{admin_path}/login", methods=["GET", "POST"])
     def admin_login():
         if request.method == "POST":
             username = request.form.get("username", "").strip()
@@ -277,14 +279,14 @@ def create_app() -> Flask:
             flash("账号或密码错误。", "error")
         return render_template("admin/login.html")
 
-    @app.post("/aichishi/logout")
+    @app.post(f"{admin_path}/logout")
     @login_required
     def admin_logout():
         session.clear()
         flash("已退出。", "success")
         return redirect(url_for("admin_login"))
 
-    @app.route("/aichishi")
+    @app.route(admin_path)
     @login_required
     def admin_dashboard():
         stats = {
@@ -311,7 +313,7 @@ def create_app() -> Flask:
             recent_orders=recent_orders,
         )
 
-    @app.route("/aichishi/categories", methods=["GET", "POST"])
+    @app.route(f"{admin_path}/categories", methods=["GET", "POST"])
     @login_required
     def admin_categories():
         if request.method == "POST":
@@ -343,7 +345,7 @@ def create_app() -> Flask:
         )
         return render_template("admin/categories.html", categories=categories)
 
-    @app.route("/aichishi/categories/<int:category_id>/edit", methods=["GET", "POST"])
+    @app.route(f"{admin_path}/categories/<int:category_id>/edit", methods=["GET", "POST"])
     @login_required
     def admin_category_edit(category_id: int):
         category = fetch_one("SELECT * FROM categories WHERE id = ?", (category_id,))
@@ -368,7 +370,7 @@ def create_app() -> Flask:
             return redirect(url_for("admin_categories"))
         return render_template("admin/category_form.html", category=category)
 
-    @app.post("/aichishi/categories/<int:category_id>/delete")
+    @app.post(f"{admin_path}/categories/<int:category_id>/delete")
     @login_required
     def admin_category_delete(category_id: int):
         category = fetch_one("SELECT * FROM categories WHERE id = ?", (category_id,))
@@ -385,7 +387,7 @@ def create_app() -> Flask:
         flash("分类已删除。", "success")
         return redirect(url_for("admin_categories"))
 
-    @app.route("/aichishi/products")
+    @app.route(f"{admin_path}/products")
     @login_required
     def admin_products():
         products = fetch_all(
@@ -403,7 +405,7 @@ def create_app() -> Flask:
         )
         return render_template("admin/products.html", products=products)
 
-    @app.route("/aichishi/products/new", methods=["GET", "POST"])
+    @app.route(f"{admin_path}/products/new", methods=["GET", "POST"])
     @login_required
     def admin_product_new():
         if request.method == "POST":
@@ -416,7 +418,7 @@ def create_app() -> Flask:
             categories=category_options(),
         )
 
-    @app.route("/aichishi/products/<int:product_id>/edit", methods=["GET", "POST"])
+    @app.route(f"{admin_path}/products/<int:product_id>/edit", methods=["GET", "POST"])
     @login_required
     def admin_product_edit(product_id: int):
         product = get_product_or_404(product_id)
@@ -430,7 +432,7 @@ def create_app() -> Flask:
             categories=category_options(),
         )
 
-    @app.route("/aichishi/products/<int:product_id>/cards", methods=["GET", "POST"])
+    @app.route(f"{admin_path}/products/<int:product_id>/cards", methods=["GET", "POST"])
     @login_required
     def admin_product_cards(product_id: int):
         product = get_product_or_404(product_id)
@@ -451,7 +453,7 @@ def create_app() -> Flask:
             counts=counts,
         )
 
-    @app.post("/aichishi/cards/<int:card_id>/void")
+    @app.post(f"{admin_path}/cards/<int:card_id>/void")
     @login_required
     def admin_card_void(card_id: int):
         card = fetch_one("SELECT * FROM cards WHERE id = ?", (card_id,))
@@ -467,25 +469,25 @@ def create_app() -> Flask:
             flash("卡密已作废。", "success")
         return redirect(url_for("admin_product_cards", product_id=card["product_id"]))
 
-    @app.route("/aichishi/orders")
+    @app.route(f"{admin_path}/orders")
     @login_required
     def admin_orders():
         orders = fetch_all("SELECT * FROM orders ORDER BY id DESC LIMIT 200")
         return render_template("admin/orders.html", orders=orders)
 
-    @app.route("/aichishi/tickets")
+    @app.route(f"{admin_path}/tickets")
     @login_required
     def admin_tickets():
         tickets = fetch_all("SELECT * FROM support_tickets ORDER BY id DESC LIMIT 200")
         return render_template("admin/tickets.html", tickets=tickets)
 
-    @app.route("/aichishi/payments")
+    @app.route(f"{admin_path}/payments")
     @login_required
     def admin_payments():
         providers = fetch_all("SELECT * FROM payment_providers ORDER BY id ASC")
         return render_template("admin/payments.html", providers=providers)
 
-    @app.route("/aichishi/payments/<code>/edit", methods=["GET", "POST"])
+    @app.route(f"{admin_path}/payments/<code>/edit", methods=["GET", "POST"])
     @login_required
     def admin_payment_edit(code: str):
         provider = fetch_one("SELECT * FROM payment_providers WHERE code = ?", (code,))
@@ -534,7 +536,7 @@ def create_app() -> Flask:
             form_values["config_json"] = provider["config_json"] or "{}"
         return render_template("admin/payment_form.html", provider=form_values)
 
-    @app.post("/aichishi/payments/<code>/toggle")
+    @app.post(f"{admin_path}/payments/<code>/toggle")
     @login_required
     def admin_payment_toggle(code: str):
         provider = fetch_one("SELECT * FROM payment_providers WHERE code = ?", (code,))
@@ -664,6 +666,18 @@ def available_stock(product_id: int) -> int:
 
 def normalize_contact(value: str) -> str:
     return value.strip().lower()
+
+
+def normalize_admin_path(value: str) -> str:
+    path = (value or "/admin").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    path = path.rstrip("/") or "/admin"
+    if path in {"/", "/index", "/buy", "/orders", "/checkout", "/payments", "/order-query", "/tickets"}:
+        raise ValueError("ADMIN_PATH conflicts with public routes.")
+    if not re.fullmatch(r"/[A-Za-z0-9][A-Za-z0-9_-]*(/[A-Za-z0-9][A-Za-z0-9_-]*)*", path):
+        raise ValueError("ADMIN_PATH may only contain letters, numbers, dashes and underscores.")
+    return path
 
 
 def is_valid_email(value: str) -> bool:
