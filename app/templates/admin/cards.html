@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}卡密 - {{ product.name }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section">
+    <div class="section-head">
+        <div>
+            <h1>{{ product.name }} 的卡密</h1>
+            <p class="muted">
+                可售 {{ counts.available }}，预占 {{ counts.reserved }}，已售 {{ counts.sold }}，作废 {{ counts.void }}
+            </p>
+        </div>
+        <a class="button secondary" href="{{ url_for('admin_products') }}">返回商品</a>
+    </div>
+</section>
+
+<section class="section narrow">
+    <h2>批量导入</h2>
+    <form class="form" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>
+            卡密内容
+            <textarea name="cards" rows="12" placeholder="一行一条卡密"></textarea>
+        </label>
+        <button class="button" type="submit">导入卡密</button>
+    </form>
+</section>
+
+<section class="section">
+    <h2>最近卡密</h2>
+    <table>
+        <thead>
+            <tr><th>ID</th><th>内容</th><th>状态</th><th>订单</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            {% for card in cards %}
+                <tr>
+                    <td>{{ card.id }}</td>
+                    <td><code>{{ card.content }}</code></td>
+                    <td>{{ card.status }}</td>
+                    <td>{{ card.order_id or "-" }}</td>
+                    <td>
+                        {% if card.status != "sold" and card.status != "void" %}
+                            <form method="post" action="{{ url_for('admin_card_void', card_id=card.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <button class="link-button danger" type="submit">作废</button>
+                            </form>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="5">暂无卡密。</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}支付通道 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section">
+    <h1>支付通道</h1>
+    <div class="notice">
+        当前只实现模拟支付。支付宝、微信和聚合支付已预留通道，拿到商户号、密钥、证书和回调域名后再接真实适配器。
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>代码</th>
+                <th>名称</th>
+                <th>类型</th>
+                <th>费率</th>
+                <th>状态</th>
+                <th>配置</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for provider in providers %}
+                <tr>
+                    <td><code>{{ provider.code }}</code></td>
+                    <td>{{ provider.name }}</td>
+                    <td>{{ provider.provider_type }}</td>
+                    <td>{{ provider.fee_rate }}</td>
+                    <td>{{ "启用" if provider.is_enabled else "停用" }}</td>
+                    <td>{{ "已配置" if provider.config_json and provider.config_json != "{}" else "未配置" }}</td>
+                    <td class="actions">
+                        <a href="{{ url_for('admin_payment_edit', code=provider.code) }}">配置</a>
+                        <form method="post" action="{{ url_for('admin_payment_toggle', code=provider.code) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button class="link-button" type="submit">
+                                {{ "停用" if provider.is_enabled else "启用" }}
+                            </button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

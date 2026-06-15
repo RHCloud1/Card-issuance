@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}工单 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section">
+    <h1>工单</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>工单号</th>
+                <th>联系邮箱</th>
+                <th>订单号</th>
+                <th>标题</th>
+                <th>内容</th>
+                <th>状态</th>
+                <th>邮箱验证</th>
+                <th>创建时间</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ticket in tickets %}
+                <tr>
+                    <td><code>{{ ticket.ticket_no }}</code></td>
+                    <td>{{ ticket.contact }}</td>
+                    <td>{{ ticket.order_no or "-" }}</td>
+                    <td>{{ ticket.subject }}</td>
+                    <td class="cell-wide">{{ ticket.message }}</td>
+                    <td>{{ ticket.status }}</td>
+                    <td>{{ "已验证" if ticket.email_verified else "未启用" }}</td>
+                    <td>{{ ticket.created_at }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="8">暂无工单。</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

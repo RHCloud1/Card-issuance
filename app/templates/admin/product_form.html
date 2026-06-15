@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}{{ "编辑商品" if product else "新增商品" }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <h1>{{ "编辑商品" if product else "新增商品" }}</h1>
+    <form class="form" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>
+            商品名称
+            <input type="text" name="name" value="{{ product.name if product else '' }}" required>
+        </label>
+        <label>
+            分类
+            <select name="category_id">
+                {% for category in categories %}
+                    <option value="{{ category.id }}"
+                        {% if product and product.category_id == category.id %}selected{% endif %}>
+                        {{ category.name }}
+                    </option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            售价
+            <input type="text" name="price" value="{{ product.price_cents|yuan if product else '0.00' }}" required>
+        </label>
+        <label>
+            单次限购
+            <input type="number" name="buy_limit" value="{{ product.buy_limit if product else 1 }}" min="1">
+        </label>
+        <label>
+            排序
+            <input type="number" name="sort_order" value="{{ product.sort_order if product else 100 }}">
+            <small>数字越小越靠前；前台选择“按类目排序”时按分类排序值、商品排序值依次排列。</small>
+        </label>
+        <label>
+            状态
+            <select name="status">
+                <option value="active" {% if not product or product.status == "active" %}selected{% endif %}>上架</option>
+                <option value="inactive" {% if product and product.status == "inactive" %}selected{% endif %}>下架</option>
+            </select>
+        </label>
+        <label>
+            描述
+            <textarea name="description" rows="5">{{ product.description if product else '' }}</textarea>
+        </label>
+        <button class="button" type="submit">保存</button>
+    </form>
+</section>
+{% endblock %}

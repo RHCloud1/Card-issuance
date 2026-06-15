@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}订单查询 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <h1>订单查询</h1>
+    <form class="form" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>
+            联系邮箱
+            <input type="email" name="contact" placeholder="填写下单时使用的邮箱" required>
+        </label>
+        <label>
+            订单号（选填）
+            <input type="text" name="order_no" placeholder="留空则查询该邮箱下全部订单">
+        </label>
+        <label>
+            取卡密码（选填）
+            <input type="text" name="query_password" placeholder="如果下单时设置过，填写后可查看卡密">
+        </label>
+        <button class="button" type="submit">查询</button>
+    </form>
+
+    {% if found_orders %}
+        <div class="result-list">
+            {% for order in found_orders %}
+                <div class="result-box">
+                    <div class="section-head">
+                        <div>
+                            <h2>{{ order.product_name }} × {{ order.quantity }}</h2>
+                            <p class="muted">订单号 {{ order.order_no }} · ￥{{ order.amount_cents|yuan }}</p>
+                        </div>
+                        <span class="status {{ order.status }}">{{ order.status }}</span>
+                    </div>
+                    {% if order.status == "fulfilled" %}
+                        {% if reveal_cards.get(order.id) %}
+                            <pre class="card-output">{{ order.delivered_content }}</pre>
+                        {% else %}
+                            <div class="notice">该订单设置过取卡密码，填写正确密码后可查看卡密。</div>
+                        {% endif %}
+                    {% else %}
+                        <a class="button secondary" href="{{ url_for('checkout', order_no=order.order_no) }}">查看订单</a>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        </div>
+    {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}商品管理 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section">
+    <div class="section-head">
+        <h1>商品管理</h1>
+        <a class="button" href="{{ url_for('admin_product_new') }}">新增商品</a>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>商品</th>
+                <th>分类</th>
+                <th>价格</th>
+                <th>排序</th>
+                <th>库存</th>
+                <th>状态</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for product in products %}
+                <tr>
+                    <td>{{ product.id }}</td>
+                    <td>{{ product.name }}</td>
+                    <td>{{ product.category_name or "-" }}</td>
+                    <td>￥{{ product.price_cents|yuan }}</td>
+                    <td>{{ product.sort_order }}</td>
+                    <td>
+                        可售 {{ product.available_cards or 0 }} /
+                        预占 {{ product.reserved_cards or 0 }} /
+                        已售 {{ product.sold_cards or 0 }}
+                    </td>
+                    <td>{{ "上架" if product.status == "active" else "下架" }}</td>
+                    <td class="actions">
+                        <a href="{{ url_for('admin_product_edit', product_id=product.id) }}">编辑</a>
+                        <a href="{{ url_for('admin_product_cards', product_id=product.id) }}">卡密</a>
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="8">暂无商品。</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

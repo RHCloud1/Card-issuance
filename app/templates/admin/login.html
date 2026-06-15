@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}后台登录 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <h1>后台登录</h1>
+    <form class="form" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>
+            账号
+            <input type="text" name="username" autocomplete="username" required>
+        </label>
+        <label>
+            密码
+            <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <button class="button" type="submit">登录</button>
+    </form>
+</section>
+{% endblock %}

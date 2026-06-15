@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}编辑分类 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <a class="back-link" href="{{ url_for('admin_categories') }}">返回分类</a>
+    <h1>编辑分类</h1>
+    <form class="form" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>
+            名称
+            <input type="text" name="name" value="{{ category.name }}" required>
+        </label>
+        <label>
+            排序
+            <input type="number" name="sort_order" value="{{ category.sort_order }}">
+            <small>数字越小越靠前；前台按类目排序时优先使用这里的排序值。</small>
+        </label>
+        <label class="checkbox">
+            <input type="checkbox" name="is_active" {% if category.is_active %}checked{% endif %}>
+            启用
+        </label>
+        <button class="button" type="submit">保存修改</button>
+    </form>
+</section>
+{% endblock %}

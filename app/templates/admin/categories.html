@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}分类管理 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <h1>新增分类</h1>
+    <form class="form" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>
+            名称
+            <input type="text" name="name" required>
+        </label>
+        <label>
+            排序
+            <input type="number" name="sort_order" value="100">
+            <small>数字越小越靠前；前台按类目排序时优先使用这里的排序值。</small>
+        </label>
+        <label class="checkbox">
+            <input type="checkbox" name="is_active" checked>
+            启用
+        </label>
+        <button class="button" type="submit">保存</button>
+    </form>
+</section>
+
+<section class="section">
+    <h2>分类列表</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>名称</th>
+                <th>排序</th>
+                <th>状态</th>
+                <th>商品数</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for category in categories %}
+                <tr>
+                    <td>{{ category.id }}</td>
+                    <td>{{ category.name }}</td>
+                    <td>{{ category.sort_order }}</td>
+                    <td>{{ "启用" if category.is_active else "停用" }}</td>
+                    <td>{{ category.product_count or 0 }}</td>
+                    <td class="actions">
+                        <a href="{{ url_for('admin_category_edit', category_id=category.id) }}">编辑</a>
+                        <form method="post" action="{{ url_for('admin_category_delete', category_id=category.id) }}"
+                              onsubmit="return confirm('确定删除这个分类吗？');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button class="link-button danger" type="submit">删除</button>
+                        </form>
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6">暂无分类。</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

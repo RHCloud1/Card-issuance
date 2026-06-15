@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}后台概览 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section">
+    <h1>后台概览</h1>
+    <div class="stat-grid">
+        <div class="stat"><span>商品数</span><strong>{{ stats.products }}</strong></div>
+        <div class="stat"><span>可售卡密</span><strong>{{ stats.available_cards }}</strong></div>
+        <div class="stat"><span>待支付订单</span><strong>{{ stats.pending_orders }}</strong></div>
+        <div class="stat"><span>已完成订单</span><strong>{{ stats.fulfilled_orders }}</strong></div>
+        <div class="stat"><span>未关闭工单</span><strong>{{ stats.open_tickets }}</strong></div>
+    </div>
+</section>
+
+<section class="section">
+    <div class="section-head">
+        <h2>最近订单</h2>
+        <a class="button secondary" href="{{ url_for('admin_orders') }}">全部订单</a>
+    </div>
+    {% include "admin/order_table.html" with context %}
+</section>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}订单管理 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section">
+    <h1>订单管理</h1>
+    {% set recent_orders = orders %}
+    {% include "admin/order_table.html" with context %}
+</section>
+{% endblock %}

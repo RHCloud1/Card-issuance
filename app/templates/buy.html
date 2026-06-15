@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}购买 {{ product.name }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <a class="back-link" href="{{ url_for('storefront') }}">返回商品</a>
+    <h1>{{ product.name }}</h1>
+    <p class="muted">{{ product.description or "暂无描述" }}</p>
+    <div class="summary-line">
+        <span>单价</span>
+        <strong>￥{{ product.price_cents|yuan }}</strong>
+    </div>
+    <div class="summary-line">
+        <span>库存</span>
+        <strong>{{ stock }}</strong>
+    </div>
+
+    <form class="form" method="post" action="{{ url_for('create_order_route') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="product_id" value="{{ product.id }}">
+
+        <label>
+            购买数量
+            <input type="number" name="quantity" min="1" max="{{ product.buy_limit }}" value="1" required>
+            <small>单次最多 {{ product.buy_limit }} 件</small>
+        </label>
+
+        <label>
+            联系邮箱
+            <input type="email" name="contact" placeholder="用于订单查询和售后工单" required>
+            <small>后续会预留邮箱验证码校验；当前用于订单查询、工单绑定和必要通知。</small>
+        </label>
+
+        <label>
+            取卡密码（选填）
+            <input type="text" name="query_password" placeholder="选填，6-20 位">
+            <small>如果填写，之后查询订单并查看卡密时需要同时输入这个密码；不填写则仅凭联系邮箱和订单号查询。</small>
+        </label>
+
+        <label>
+            支付方式
+            <select name="payment_provider" required>
+                {% for provider in providers %}
+                    <option value="{{ provider.code }}">{{ provider.name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+
+        <button class="button" type="submit">创建订单</button>
+    </form>
+</section>
+{% endblock %}

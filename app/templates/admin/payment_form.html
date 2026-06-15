@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}配置支付通道 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <a class="back-link" href="{{ url_for('admin_payments') }}">返回支付</a>
+    <h1>配置支付通道</h1>
+    <p class="muted">{{ provider.code }} · {{ provider.provider_type }}</p>
+    <form class="form" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>
+            通道名称
+            <input type="text" name="name" value="{{ provider.name }}" required>
+        </label>
+        <label>
+            费率
+            <input type="text" name="fee_rate" value="{{ provider.fee_rate }}">
+        </label>
+        <label>
+            配置 JSON
+            <textarea name="config_json" rows="14" spellcheck="false">{{ provider.config_json }}</textarea>
+            <small>可填写 app_id、merchant_id、private_key、public_key、notify_url、return_url、api_endpoint 等字段；不同支付通道需要的字段可以不同。</small>
+        </label>
+        <label class="checkbox">
+            <input type="checkbox" name="is_enabled" {% if provider.is_enabled %}checked{% endif %}>
+            启用
+        </label>
+        <button class="button" type="submit">保存配置</button>
+    </form>
+</section>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}订单 {{ order.order_no }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <h1>订单 {{ order.order_no }}</h1>
+    <div class="status {{ order.status }}">{{ order.status }}</div>
+    <div class="notice">
+        请保存订单号和下单联系邮箱。后续可通过订单查询页面再次查看订单和卡密。
+    </div>
+
+    <div class="summary-line">
+        <span>商品</span>
+        <strong>{{ order.product_name }} × {{ order.quantity }}</strong>
+    </div>
+    <div class="summary-line">
+        <span>金额</span>
+        <strong>￥{{ order.amount_cents|yuan }}</strong>
+    </div>
+    <div class="summary-line">
+        <span>支付方式</span>
+        <strong>{{ provider.name if provider else order.payment_provider }}</strong>
+    </div>
+
+    {% if order.status == "pending" %}
+        <div class="notice">
+            请在 {{ order.expires_at }} 前完成支付。订单过期后预占卡密会自动释放。
+        </div>
+        {% if order.payment_provider == "mock" %}
+            <form method="post" action="{{ url_for('mock_payment_succeed', order_no=order.order_no) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button class="button" type="submit">模拟支付成功并自动发卡</button>
+            </form>
+        {% else %}
+            <div class="notice">
+                当前支付通道尚未接入真实网关。后续会在这里跳转到支付宝/微信收银台。
+            </div>
+        {% endif %}
+    {% elif order.status == "fulfilled" %}
+        <h2>卡密</h2>
+        <pre class="card-output">{{ order.delivered_content }}</pre>
+    {% elif order.status == "expired" %}
+        <div class="notice error">订单已过期，请重新下单。</div>
+    {% else %}
+        <div class="notice error">订单异常：{{ order.error_message or "请联系管理员处理。" }}</div>
+    {% endif %}
+</section>
+{% endblock %}

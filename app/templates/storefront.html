@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}商品 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <div>
+        <h1>自动发卡</h1>
+        <p>选择商品，完成支付后自动展示卡密。</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('order_query') }}">查询订单</a>
+</section>
+
+{% if categories %}
+<section class="section">
+    <div class="section-head">
+        <h2>商品分类</h2>
+        <form class="inline-form" method="get">
+            {% if selected_category_id %}
+                <input type="hidden" name="category_id" value="{{ selected_category_id }}">
+            {% endif %}
+            <label>
+                排序
+                <select name="sort" onchange="this.form.submit()">
+                    {% for value, label in sort_options.items() %}
+                        <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </form>
+    </div>
+    <div class="chip-row">
+        <a class="chip {% if not selected_category_id %}active{% endif %}" href="{{ url_for('storefront', sort=sort) }}">
+            全部
+        </a>
+        {% for category in categories %}
+            <a class="chip {% if selected_category_id == category.id %}active{% endif %}"
+               href="{{ url_for('storefront', category_id=category.id, sort=sort) }}">
+                {{ category.name }} · {{ category.product_count }}
+            </a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+<section class="section">
+    <h2>商品</h2>
+    {% if products %}
+        <div class="product-grid">
+            {% for product in products %}
+                <article class="product-card">
+                    <div>
+                        <div class="muted">{{ product.category_name or "未分类" }}</div>
+                        <h3>{{ product.name }}</h3>
+                        <p>{{ product.description or "暂无描述" }}</p>
+                    </div>
+                    <div class="product-meta">
+                        <strong>￥{{ product.price_cents|yuan }}</strong>
+                        <span>库存 {{ product.stock or 0 }}</span>
+                    </div>
+                    {% if (product.stock or 0) > 0 %}
+                        <a class="button" href="{{ url_for('buy', product_id=product.id) }}">购买</a>
+                    {% else %}
+                        <button class="button disabled" disabled>库存不足</button>
+                    {% endif %}
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="empty">暂无可购买商品。</div>
+    {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}{{ app_name }}{% endblock %}</title>
+    <script>
+        (function () {
+            var theme = localStorage.getItem("theme");
+            if (theme === "light" || theme === "dark") {
+                document.documentElement.dataset.theme = theme;
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="{{ url_for('storefront') }}">{{ app_name }}</a>
+        <nav class="nav">
+            {% if not is_admin_area %}
+                <a href="{{ url_for('storefront') }}">商品</a>
+                <a href="{{ url_for('order_query') }}">订单查询</a>
+                <a href="{{ url_for('ticket_new') }}">提交工单</a>
+            {% endif %}
+            {% if is_admin_area and session.get("admin_user_id") %}
+                <a href="{{ url_for('admin_dashboard') }}">后台</a>
+            {% endif %}
+            <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换亮暗模式">🌙</button>
+        </nav>
+    </header>
+
+    {% if is_admin_area and session.get("admin_user_id") %}
+        <aside class="admin-nav">
+            <a href="{{ url_for('admin_dashboard') }}">概览</a>
+            <a href="{{ url_for('admin_categories') }}">分类</a>
+            <a href="{{ url_for('admin_products') }}">商品管理</a>
+            <a href="{{ url_for('admin_orders') }}">订单</a>
+            <a href="{{ url_for('admin_tickets') }}">工单</a>
+            <a href="{{ url_for('admin_payments') }}">支付</a>
+            <form action="{{ url_for('admin_logout') }}" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="link-button">退出</button>
+            </form>
+        </aside>
+    {% endif %}
+
+    <main class="page {% if is_admin_area and session.get('admin_user_id') %}with-admin-nav{% endif %}">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-wrap">
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+        (function () {
+            var button = document.getElementById("themeToggle");
+            var root = document.documentElement;
+            var media = window.matchMedia("(prefers-color-scheme: dark)");
+
+            function effectiveTheme() {
+                var stored = localStorage.getItem("theme");
+                if (stored === "light" || stored === "dark") {
+                    return stored;
+                }
+                return media.matches ? "dark" : "light";
+            }
+
+            function render() {
+                var theme = effectiveTheme();
+                button.textContent = theme === "dark" ? "☀" : "🌙";
+                button.setAttribute("aria-label", theme === "dark" ? "切换到亮色模式" : "切换到暗色模式");
+            }
+
+            button.addEventListener("click", function () {
+                var next = effectiveTheme() === "dark" ? "light" : "dark";
+                localStorage.setItem("theme", next);
+                root.dataset.theme = next;
+                render();
+            });
+            media.addEventListener("change", render);
+            render();
+        })();
+    </script>
+</body>
+</html>

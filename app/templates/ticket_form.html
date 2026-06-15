@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}提交工单 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section narrow">
+    <h1>提交工单</h1>
+    <p class="muted">工单会绑定联系邮箱。邮箱验证码功能已预留，当前暂不发送验证码。</p>
+    <form class="form" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>
+            联系邮箱
+            <input type="email" name="contact" placeholder="填写下单时使用的邮箱" required>
+        </label>
+        <label>
+            订单号（选填）
+            <input type="text" name="order_no" placeholder="如果问题和某个订单有关，请填写订单号">
+        </label>
+        <label>
+            标题
+            <input type="text" name="subject" placeholder="简要说明问题" required>
+        </label>
+        <label>
+            问题描述
+            <textarea name="message" rows="6" placeholder="请描述遇到的问题、支付状态或需要处理的内容" required></textarea>
+        </label>
+        <button class="button" type="submit">提交工单</button>
+    </form>
+</section>
+{% endblock %}
