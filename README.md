@@ -48,8 +48,11 @@ SQLite 数据默认挂载在宿主机 `./data` 目录，容器重建不会删除
 app/                  Flask 应用代码、模板和静态文件
 data/                 SQLite 数据目录，本地运行后生成，不提交 Git
 docs/                 架构说明
-scripts/deploy.sh     首次部署脚本
+scripts/install.sh    全新 VPS 一键安装入口
+scripts/setup.sh      交互式部署配置脚本
+scripts/deploy.sh     启动或重建脚本
 scripts/update.sh     后续一键更新脚本
+scripts/diagnose.sh   部署诊断脚本
 scripts/dev.ps1       Windows 本地开发启动脚本
 schema.sql            数据库结构
 docker-compose.yml    Docker Compose 配置
@@ -70,7 +73,86 @@ Dockerfile            容器镜像构建文件
 - Docker Engine
 - Docker Compose Plugin
 
-## 安装 Docker
+建议在 VPS 上使用 `root` 登录，或先执行 `sudo -i` 后再运行安装脚本。脚本兼容 root 和 sudo 用户，但 Docker 权限最少会省掉一类常见问题。
+
+## 推荐部署方式
+
+如果是全新 Ubuntu VPS，推荐直接运行一键安装入口：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/RHCloud1/Card-issuance/main/scripts/install.sh)
+```
+
+如果已经克隆过仓库，可以进入项目目录后重新跑交互配置：
+
+```bash
+git pull --ff-only
+chmod +x scripts/*.sh
+./scripts/setup.sh
+```
+
+脚本会依次处理：
+
+1. 安装 Git、Docker 和 Docker Compose Plugin
+2. 克隆项目到你指定的目录，默认 `/opt/card-issuance`
+3. 询问部署模式
+4. 询问域名、后台路径、管理员邮箱、管理员密码等配置
+5. 生成 `.env`
+6. 生成 `docker-compose.override.yml`
+7. 如果选择 HTTPS，自动生成 Caddy 配置并申请证书
+8. 构建并启动容器
+9. 输出真实前台和后台访问地址
+
+## 443 和 8080 的区别
+
+`8080` 是应用容器内部 HTTP 服务端口。直接访问时地址类似：
+
+```text
+http://你的域名或IP:8080/
+```
+
+如果浏览器访问 `https://域名:8080`，通常会失败，因为 8080 上跑的是 HTTP，不是 HTTPS。
+
+如果想使用常规的：
+
+```text
+https://你的域名/
+```
+
+就需要在应用前面放一个能处理 HTTPS 证书的入口。本项目交互脚本默认推荐 **Caddy**，它会监听 80/443，自动申请 Let's Encrypt 证书，并反向代理到应用容器。
+
+也就是说：
+
+- 临时测试：可以选 HTTP 直连端口，例如 8080
+- 正式使用：建议选 HTTPS + Caddy，直接走 443
+
+无论哪种方式，都需要确认 VPS 防火墙和云厂商安全组放行对应端口。
+
+## 部署后打不开的排查
+
+先确认访问地址和部署模式匹配：
+
+- HTTPS + Caddy：访问 `https://你的域名/`，不要加 `:8080`
+- HTTP 直连端口：访问 `http://你的域名或IP:端口/`
+- `https://域名:8080` 基本一定不对，因为 8080 默认不是 HTTPS
+
+然后在项目目录执行诊断：
+
+```bash
+cd /path/to/card-issuance
+chmod +x scripts/diagnose.sh
+./scripts/diagnose.sh
+```
+
+常见原因：
+
+- DNS 还没有指向当前 VPS
+- 云厂商安全组或系统防火墙没有放行 80/443 或直连端口
+- 域名开启了代理/CDN，但源站端口没有放行
+- Caddy 申请证书失败，可以看 `docker compose logs -f caddy`
+- 应用容器没启动，可以看 `docker compose ps` 和 `docker compose logs -f card-issuance`
+
+## 手动安装 Docker
 
 Ubuntu/Debian 可以使用项目内脚本：
 
@@ -93,7 +175,7 @@ docker --version
 docker compose version
 ```
 
-## 首次部署
+## 手动首次部署
 
 克隆仓库：
 
@@ -102,60 +184,46 @@ git clone https://github.com/RHCloud1/Card-issuance.git card-issuance
 cd card-issuance
 ```
 
-创建配置文件：
+运行交互式配置：
 
 ```bash
-cp .env.example .env
+chmod +x scripts/*.sh
+./scripts/setup.sh
 ```
 
-编辑 `.env`：
+脚本会询问以下信息：
 
-```bash
-nano .env
-```
-
-至少修改以下配置：
-
-```env
-APP_NAME=Card Issuance
-APP_SECRET=替换为一段很长的随机字符串
-APP_BASE_URL=https://你的域名
-DATABASE_PATH=/data/card_issuance.sqlite3
-ADMIN_PATH=/替换成你自己的后台路径
-ADMIN_USERNAME=你的后台邮箱
-ADMIN_PASSWORD=你的后台强密码
-ORDER_EXPIRE_MINUTES=15
-```
-
-生成 `APP_SECRET` 示例：
-
-```bash
-openssl rand -base64 48
-```
-
-启动：
-
-```bash
-chmod +x scripts/deploy.sh
-./scripts/deploy.sh
-```
+- 部署模式：HTTPS + Caddy，或 HTTP 直连端口
+- 域名：HTTPS 模式必填，且 DNS 必须指向当前服务器
+- TLS 证书邮箱：用于 Let's Encrypt
+- 站点名称
+- 后台路径
+- 管理员登录邮箱
+- 管理员密码
+- 订单过期分钟数
 
 访问：
 
-- 前台：`http://服务器IP:8080/`
-- 后台：`http://服务器IP:8080` + `.env` 中的 `ADMIN_PATH` + `/login`
+- 前台：脚本结束时输出的 `Frontend`
+- 后台：脚本结束时输出的 `Admin`
 
-## 宝塔或 Nginx 反向代理
+## 宝塔、Nginx 或 Caddy
 
-推荐让 Docker 只监听本机 `8080`，由宝塔或 Nginx 负责域名和 HTTPS。
+如果你不用本项目内置 Caddy，也可以让 Docker 只提供 HTTP 端口，由宝塔或 Nginx 负责域名和 HTTPS。
 
-反向代理目标：
+如果反代服务和应用在同一个 Docker 网络里，反向代理目标可以是：
+
+```text
+http://card-issuance:8080
+```
+
+如果宝塔或 Nginx 在宿主机上运行，并选择了 HTTP 直连端口，则目标通常是：
 
 ```text
 http://127.0.0.1:8080
 ```
 
-Nginx 示例：
+Nginx 宿主机示例：
 
 ```nginx
 server {

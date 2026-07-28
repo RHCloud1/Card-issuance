@@ -4,4 +4,8 @@ __pycache__/
 *.pyc
 data/
 backups/
+caddy_data/
+caddy_config/
+Caddyfile
+docker-compose.override.yml
 .pytest_cache/
