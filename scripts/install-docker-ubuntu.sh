@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "开始安装 Docker..."
+
 if ! command -v apt-get >/dev/null 2>&1; then
-  echo "This installer targets Ubuntu/Debian systems with apt-get." >&2
+  echo "此安装脚本仅支持带有 apt-get 的 Ubuntu/Debian 系统。" >&2
   exit 1
 fi
 
@@ -12,7 +14,7 @@ run_as_root() {
   elif command -v sudo >/dev/null 2>&1; then
     sudo "$@"
   else
-    echo "This command needs root privileges, but sudo is not installed. Re-run as root." >&2
+    echo "此命令需要 root 权限，但未安装 sudo。请以 root 身份重新运行。" >&2
     exit 1
   fi
 }

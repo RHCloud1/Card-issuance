@@ -5,10 +5,131 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$APP_DIR"
 
 require_command() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    echo "Missing required command: $1" >&2
+  local name="$1"
+  local hint="${2:-}"
+  if ! command -v "$name" >/dev/null 2>&1; then
+    echo "缺少必需命令：$name" >&2
+    if [ -n "$hint" ]; then
+      echo "$hint" >&2
+    fi
     exit 1
   fi
+}
+
+project_caddy_bindings_for_port() {
+  local port="$1"
+
+  if ! docker ps --format '{{.Names}}' | grep -Fx 'card-issuance-caddy' >/dev/null; then
+    return 1
+  fi
+
+  docker inspect --format \
+    "{{range (index .NetworkSettings.Ports \"${port}/tcp\")}}{{printf \"%s|%s\\n\" .HostIp .HostPort}}{{end}}" \
+    card-issuance-caddy 2>/dev/null
+}
+
+normalize_listener_endpoint() {
+  local endpoint="$1"
+  local expected_port="$2"
+  local host port
+
+  if [[ "$endpoint" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$endpoint" =~ ^(.+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+
+  if [ -z "$host" ] || [ "$host" = "*" ] || [ "$port" != "$expected_port" ]; then
+    return 1
+  fi
+
+  printf '%s|%s' "$host" "$port"
+}
+
+binding_matches_listener() {
+  local bindings="$1"
+  local listener="$2"
+  local expected_port="$3"
+  local host host_port extra
+
+  while IFS='|' read -r host host_port extra; do
+    if [ -n "$extra" ] || [ -z "$host" ] || [ "$host_port" != "$expected_port" ]; then
+      continue
+    fi
+    host="${host#[}"
+    host="${host%]}"
+    if [ "$host|$host_port" = "$listener" ]; then
+      return 0
+    fi
+  done <<< "$bindings"
+
+  return 1
+}
+
+project_caddy_owns_all_listeners() {
+  local port="$1"
+  local listeners="$2"
+  local bindings line state receive_queue send_queue endpoint remainder listener
+
+  if ! bindings="$(project_caddy_bindings_for_port "$port")" || [ -z "$bindings" ]; then
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    state=""
+    receive_queue=""
+    send_queue=""
+    endpoint=""
+    remainder=""
+    read -r state receive_queue send_queue endpoint remainder <<< "$line"
+    if [ -z "$endpoint" ]; then
+      return 1
+    fi
+    if ! listener="$(normalize_listener_endpoint "$endpoint" "$port")"; then
+      return 1
+    fi
+    if ! binding_matches_listener "$bindings" "$listener" "$port"; then
+      return 1
+    fi
+  done <<< "$listeners"
+
+  return 0
+}
+
+show_port_owners() {
+  echo "80/443 端口监听情况：" >&2
+  ss -ltnp '( sport = :80 or sport = :443 )' 2>&1 || true
+  echo "相关 Docker 容器：" >&2
+  docker ps --format 'table {{.Names}}\t{{.Ports}}' 2>&1 || true
+}
+
+check_https_ports() {
+  local port listeners
+  if ! command -v ss >/dev/null 2>&1; then
+    echo "警告：未找到 ss，无法检查 HTTPS 端口占用情况，将继续部署。" >&2
+    return 0
+  fi
+
+  for port in 80 443; do
+    if ! listeners="$(ss -ltnH "sport = :$port" 2>/dev/null)"; then
+      echo "无法读取端口 $port 的监听信息，已停止 HTTPS 部署。" >&2
+      show_port_owners
+      return 1
+    fi
+    if [ -n "$listeners" ]; then
+      if project_caddy_owns_all_listeners "$port" "$listeners"; then
+        continue
+      fi
+      echo "端口 $port 已被占用，无法启动 HTTPS 部署。" >&2
+      show_port_owners
+      return 1
+    fi
+  done
 }
 
 prompt() {
@@ -33,7 +154,7 @@ prompt_required() {
       printf '%s' "$value"
       return
     fi
-    echo "This value is required." >&2
+    echo "此项为必填项。" >&2
   done
 }
 
@@ -43,13 +164,13 @@ prompt_secret() {
   while true; do
     read -r -s -p "$label: " first
     echo >&2
-    read -r -s -p "Confirm $label: " second
+    read -r -s -p "确认$label: " second
     echo >&2
     if [ -n "$first" ] && [ "$first" = "$second" ]; then
       printf '%s' "$first"
       return
     fi
-    echo "Passwords do not match or are empty. Try again." >&2
+    echo "两次密码不一致或密码为空，请重试。" >&2
   done
 }
 
@@ -63,7 +184,7 @@ prompt_integer() {
       printf '%s' "$value"
       return
     fi
-    echo "Enter a positive integer." >&2
+    echo "请输入正整数。" >&2
   done
 }
 
@@ -77,7 +198,7 @@ prompt_port() {
       printf '%s' "$value"
       return
     fi
-    echo "Enter a TCP port between 1 and 65535." >&2
+    echo "请输入 1 到 65535 之间的 TCP 端口。" >&2
   done
 }
 
@@ -110,15 +231,15 @@ normalize_host() {
   host="${host%%/*}"
   host="${host%.}"
   if [ -z "$host" ]; then
-    echo "Host cannot be empty." >&2
+    echo "主机名不能为空。" >&2
     return 1
   fi
   if [[ "$host" == *:* ]]; then
-    echo "Enter only the domain or IP here, without protocol or port." >&2
+    echo "请只输入域名或 IP 地址，不含协议和端口。" >&2
     return 1
   fi
   if ! [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$ || "$host" =~ ^[A-Za-z0-9]$ ]]; then
-    echo "Invalid domain or IP: $host" >&2
+    echo "域名或 IP 地址无效：$host" >&2
     return 1
   fi
   printf '%s' "$host"
@@ -135,12 +256,12 @@ normalize_admin_path() {
   esac
   path="${path%/}"
   if ! [[ "$path" =~ ^/[A-Za-z0-9][A-Za-z0-9_-]*(/[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
-    echo "Invalid admin path. Use letters, numbers, dashes and underscores only." >&2
+    echo "管理路径无效。只能使用字母、数字、连字符和下划线。" >&2
     exit 1
   fi
   case "$path" in
     /|/index|/buy|/orders|/checkout|/payments|/order-query|/tickets)
-      echo "Admin path conflicts with public routes: $path" >&2
+      echo "管理路径与公开路由冲突：$path" >&2
       exit 1
       ;;
   esac
@@ -153,40 +274,45 @@ detect_public_ip() {
 
 require_command docker
 if ! docker compose version >/dev/null 2>&1; then
-  echo "Docker Compose Plugin is required. Install Docker first, then rerun this script." >&2
+  echo "需要 Docker Compose 插件。请先安装 Docker，然后重新运行此脚本。" >&2
   exit 1
 fi
 
-echo "Card Issuance interactive setup"
+echo "Card Issuance 交互式部署"
 echo
-echo "Deployment mode:"
-echo "  1) HTTPS with Caddy on ports 80/443 (recommended for domain deployment)"
-echo "  2) HTTP direct port, for testing or manual reverse proxy"
+echo "部署模式："
+echo "  1) 使用 Caddy 的 HTTPS（端口 80/443，推荐域名部署）"
+echo "  2) HTTP 直连端口（用于测试或手动反向代理）"
 while true; do
-  mode="$(prompt "Choose mode" "1")"
+  mode="$(prompt "请选择模式" "1")"
   case "$mode" in
     1|https|HTTPS) mode="https"; break ;;
     2|http|HTTP) mode="http"; break ;;
-    *) echo "Enter 1 or 2." ;;
+    *) echo "请输入 1 或 2。" ;;
   esac
 done
 
-app_name="$(prompt "Site name" "Card Issuance")"
-order_expire_minutes="$(prompt_integer "Order expiration minutes" "15")"
+if [ "$mode" = "https" ]; then
+  require_command curl "HTTPS 部署需要 curl。请先安装 curl 后重新运行此脚本。"
+  check_https_ports
+fi
+
+app_name="$(prompt "站点名称" "Card Issuance")"
+order_expire_minutes="$(prompt_integer "订单过期分钟数" "15")"
 admin_default="/admin-$(random_suffix)"
-admin_path="$(normalize_admin_path "$(prompt "Admin path" "$admin_default")")"
-admin_username="$(prompt_required "Admin login email")"
-admin_password="$(prompt_secret "Admin password")"
+admin_path="$(normalize_admin_path "$(prompt "管理路径" "$admin_default")")"
+admin_username="$(prompt_required "管理员登录邮箱")"
+admin_password="$(prompt_secret "管理员密码")"
 app_secret="$(generate_secret)"
 
 if [ "$mode" = "https" ]; then
   while true; do
-    domain_raw="$(prompt_required "Domain, already pointing to this server")"
+    domain_raw="$(prompt_required "已解析到此服务器的域名")"
     if domain="$(normalize_host "$domain_raw")"; then
       break
     fi
   done
-  acme_email="$(prompt "TLS certificate email, used by Let's Encrypt" "$admin_username")"
+  acme_email="$(prompt "TLS 证书邮箱（供 Let's Encrypt 使用）" "$admin_username")"
   app_base_url="https://$domain"
   app_port=""
 
@@ -216,6 +342,9 @@ services:
     image: caddy:2-alpine
     container_name: card-issuance-caddy
     restart: unless-stopped
+    dns:
+      - "${CONTAINER_DNS_PRIMARY:-1.1.1.1}"
+      - "${CONTAINER_DNS_SECONDARY:-8.8.8.8}"
     depends_on:
       - card-issuance
     ports:
@@ -228,12 +357,12 @@ services:
 EOF_COMPOSE
 else
   while true; do
-    public_host_raw="$(prompt "Public domain or server IP" "$(detect_public_ip)")"
+    public_host_raw="$(prompt "公开域名或服务器 IP" "$(detect_public_ip)")"
     if public_host="$(normalize_host "$public_host_raw")"; then
       break
     fi
   done
-  app_port="$(prompt_port "Public HTTP port" "8080")"
+  app_port="$(prompt_port "公开 HTTP 端口" "8080")"
   app_base_url="http://$public_host:$app_port"
 
   cat > docker-compose.override.yml <<EOF_COMPOSE
@@ -253,6 +382,8 @@ ADMIN_PATH=$admin_path
 ADMIN_USERNAME=$admin_username
 ADMIN_PASSWORD=$admin_password
 ORDER_EXPIRE_MINUTES=$order_expire_minutes
+CONTAINER_DNS_PRIMARY=1.1.1.1
+CONTAINER_DNS_SECONDARY=8.8.8.8
 EOF_ENV
 chmod 600 .env
 
@@ -260,18 +391,40 @@ mkdir -p data backups
 
 docker compose up -d --build
 
+if [ "$mode" = "https" ]; then
+  https_ready=false
+  for ((attempt = 1; attempt <= 12; attempt++)); do
+    if curl --silent --show-error --fail --head \
+      --max-time 5 \
+      --resolve "$domain:443:127.0.0.1" \
+      "https://$domain/"; then
+      https_ready=true
+      break
+    fi
+    sleep 5
+  done
+
+  if [ "$https_ready" != true ]; then
+    echo "HTTPS 尚未就绪，已达到等待上限。保留容器以便诊断。" >&2
+    echo "最近的 Caddy 日志：" >&2
+    docker compose logs --tail=100 caddy >&2 || true
+    echo "请运行 ./scripts/diagnose.sh 继续诊断。" >&2
+    exit 1
+  fi
+fi
+
 echo
-echo "Deployment complete."
-echo "Frontend: $app_base_url/"
-echo "Admin:    $app_base_url$admin_path/login"
+echo "部署完成。"
+echo "前台：$app_base_url/"
+echo "管理后台：$app_base_url$admin_path/login"
 if [ "$mode" = "https" ]; then
   echo
-  echo "Required: DNS A/AAAA record for $domain must point to this server."
-  echo "Required: ports 80 and 443 must be open in the VPS firewall/security group."
-  echo "Visit without :8080. The correct URL is $app_base_url/"
-  echo "If HTTPS is not ready yet, check: docker compose logs -f caddy"
+  echo "请确认 $domain 的 DNS A/AAAA 记录已指向此服务器。"
+  echo "请确认 VPS 防火墙或安全组已开放 80 和 443 端口。"
+  echo "访问时无需添加 :8080，正确地址为 $app_base_url/"
+  echo "若 HTTPS 尚未就绪，请检查：docker compose logs -f caddy"
 else
   echo
-  echo "Direct HTTP mode uses port $app_port."
-  echo "Open TCP $app_port in the VPS firewall/security group, then visit $app_base_url/"
+  echo "HTTP 直连模式使用端口 $app_port。"
+  echo "请在 VPS 防火墙或安全组中开放 TCP $app_port，然后访问 $app_base_url/"
 fi

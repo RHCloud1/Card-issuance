@@ -4,6 +4,8 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/RHCloud1/Card-issuance.git}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/RHCloud1/Card-issuance/main}"
 
+echo "开始安装 Card Issuance..."
+
 prompt() {
   local label="$1"
   local default="${2:-}"
@@ -23,13 +25,13 @@ run_as_root() {
   elif command -v sudo >/dev/null 2>&1; then
     sudo "$@"
   else
-    echo "This command needs root privileges, but sudo is not installed. Re-run as root." >&2
+    echo "此命令需要 root 权限，但未安装 sudo。请以 root 身份重新运行。" >&2
     exit 1
   fi
 }
 
 if ! command -v apt-get >/dev/null 2>&1; then
-  echo "This installer targets Ubuntu/Debian systems with apt-get." >&2
+  echo "此安装脚本仅支持带有 apt-get 的 Ubuntu/Debian 系统。" >&2
   exit 1
 fi
 
@@ -37,7 +39,7 @@ run_as_root apt-get update
 run_as_root apt-get install -y ca-certificates curl git
 
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
-  echo "Docker or Docker Compose is missing. Installing Docker..."
+  echo "未检测到 Docker 或 Docker Compose。正在安装 Docker..."
   tmp_installer="$(mktemp)"
   curl -fsSL "$RAW_BASE/scripts/install-docker-ubuntu.sh" -o "$tmp_installer"
   bash "$tmp_installer"
@@ -45,8 +47,8 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 fi
 
 if ! docker compose version >/dev/null 2>&1; then
-  echo "Docker is installed, but the current user cannot run 'docker compose'." >&2
-  echo "Use a root shell, or add this user to the docker group and log in again." >&2
+  echo "Docker 已安装，但当前用户无法运行 'docker compose'。" >&2
+  echo "请使用 root shell，或将此用户添加到 docker 组后重新登录。" >&2
   exit 1
 fi
 
@@ -56,13 +58,13 @@ else
   default_install_dir="$HOME/card-issuance"
 fi
 
-install_dir="$(prompt "Install directory" "$default_install_dir")"
+install_dir="$(prompt "安装目录" "$default_install_dir")"
 
 if [ -d "$install_dir/.git" ]; then
-  echo "Existing repository found at $install_dir. Updating..."
+  echo "在 $install_dir 发现已有仓库。正在更新..."
   git -C "$install_dir" pull --ff-only
 elif [ -e "$install_dir" ]; then
-  echo "$install_dir exists but is not a Git repository. Choose another directory or remove it." >&2
+  echo "$install_dir 已存在，但不是 Git 仓库。请选择另一个目录或删除此目录。" >&2
   exit 1
 else
   git clone "$REPO_URL" "$install_dir"

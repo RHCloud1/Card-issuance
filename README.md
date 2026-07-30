@@ -103,6 +103,21 @@ chmod +x scripts/*.sh
 8. 构建并启动容器
 9. 输出真实前台和后台访问地址
 
+### 容器 DNS 默认值
+
+`setup.sh` 会在 `.env` 中写入以下默认 DNS。这些设置只作用于本项目的 Docker Compose 容器，不会修改 VPS、Docker 守护进程或同机其他容器的 DNS：
+
+```dotenv
+CONTAINER_DNS_PRIMARY=1.1.1.1
+CONTAINER_DNS_SECONDARY=8.8.8.8
+```
+
+如需使用自己的 DNS，编辑 `.env` 中这两个值后重新创建容器：
+
+```bash
+docker compose up -d --force-recreate
+```
+
 ## 443 和 8080 的区别
 
 `8080` 是应用容器内部 HTTP 服务端口。直接访问时地址类似：
@@ -120,6 +135,10 @@ https://你的域名/
 ```
 
 就需要在应用前面放一个能处理 HTTPS 证书的入口。本项目交互脚本默认推荐 **Caddy**，它会监听 80/443，自动申请 Let's Encrypt 证书，并反向代理到应用容器。
+
+选择 HTTPS 模式时，宿主机 TCP `80` 和 `443` 默认明确由 Card Issuance 的 Caddy 使用。安装程序会在构建前检查这两个端口；发现已有监听时会输出 `ss` 监听信息和 Docker 端口映射，但不会停止或修改任何现有服务。
+
+同一台 VPS 上运行的 V2bX 等节点不能同时占用 TCP `80` 或 `443`。请将这些节点改用其他 TCP 端口，或者选择 HTTP 直连模式并由现有的 Nginx、宝塔或外部反向代理负责 HTTPS。
 
 也就是说：
 
@@ -204,12 +223,12 @@ chmod +x scripts/*.sh
 
 访问：
 
-- 前台：脚本结束时输出的 `Frontend`
-- 后台：脚本结束时输出的 `Admin`
+- 前台：脚本结束时输出的 `前台`
+- 后台：脚本结束时输出的 `管理后台`
 
 ## 宝塔、Nginx 或 Caddy
 
-如果你不用本项目内置 Caddy，也可以让 Docker 只提供 HTTP 端口，由宝塔或 Nginx 负责域名和 HTTPS。
+如果你不用本项目内置 Caddy，也可以选择 HTTP 直连模式，让 Docker 提供 HTTP 端口，由宝塔、Nginx 或外部反向代理负责域名和 HTTPS。这种架构适用于需要保留同机 V2bX、Nginx 或其他服务占用 TCP `80/443` 的场景。
 
 如果反代服务和应用在同一个 Docker 网络里，反向代理目标可以是：
 

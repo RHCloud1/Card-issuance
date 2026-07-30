@@ -9,3 +9,4 @@ caddy_config/
 Caddyfile
 docker-compose.override.yml
 .pytest_cache/
+.worktrees/

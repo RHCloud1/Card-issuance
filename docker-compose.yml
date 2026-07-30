@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    dns:
+      - "${CONTAINER_DNS_PRIMARY:-1.1.1.1}"
+      - "${CONTAINER_DNS_SECONDARY:-8.8.8.8}"
     expose:
       - "8080"
     volumes:
