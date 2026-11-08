@@ -23,7 +23,7 @@ from flask import (
 
 from . import crypto
 from .db import close_db, fetch_all, fetch_one, get_db, init_db, is_database_busy, utcnow
-from .formatting import cents_to_yuan, yuan_to_cents
+from .formatting import CURRENCIES, cents_to_yuan, format_money, normalize_currency, yuan_to_cents
 from .security import (
     authorize_order,
     can_reveal_order,
@@ -50,15 +50,26 @@ def create_app() -> Flask:
         ORDER_EXPIRE_MINUTES=int(os.getenv("ORDER_EXPIRE_MINUTES", "15")),
         ENABLE_MOCK_PAYMENTS=os.getenv("ENABLE_MOCK_PAYMENTS", "").strip().lower()
         in {"1", "true", "yes", "on"},
+        # 同一 IP 在 LOGIN_LOCK_MINUTES 内登录失败 LOGIN_MAX_FAILURES 次后暂时锁定。
+        LOGIN_MAX_FAILURES=int(os.getenv("LOGIN_MAX_FAILURES", "5")),
+        LOGIN_LOCK_MINUTES=int(os.getenv("LOGIN_LOCK_MINUTES", "15")),
+        # 前面有几层可信反向代理（内置 Caddy 为 1）。直连模式保持 0，防止伪造 X-Forwarded-For。
+        TRUSTED_PROXY_COUNT=int(os.getenv("TRUSTED_PROXY_COUNT", "0")),
         # 后台自动扫描 USDT 入账的间隔秒数；0 表示关闭（仅订单页轮询和后台手动扫描）。
         CRYPTO_WATCH_INTERVAL=float(os.getenv("CRYPTO_WATCH_INTERVAL", "0") or 0),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
     )
     admin_path = app.config["ADMIN_PATH"]
+    if app.config["TRUSTED_PROXY_COUNT"] > 0:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+
+        hops = app.config["TRUSTED_PROXY_COUNT"]
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=hops, x_host=hops)
 
     app.teardown_appcontext(close_db)
     app.jinja_env.filters["yuan"] = cents_to_yuan
+    app.jinja_env.filters["money"] = format_money
     app.jinja_env.filters["usdt"] = crypto.units_to_text
 
     @app.context_processor
@@ -68,6 +79,7 @@ def create_app() -> Flask:
             "app_name": app.config["APP_NAME"],
             "csrf_token": csrf_token,
             "is_admin_area": endpoint.startswith("admin_"),
+            "currencies": CURRENCIES,
         }
 
     @app.before_request
@@ -352,10 +364,21 @@ def create_app() -> Flask:
     @app.route(f"{admin_path}/login", methods=["GET", "POST"])
     def admin_login():
         if request.method == "POST":
+            client_ip = request.remote_addr or "unknown"
+            if login_failure_count(client_ip) >= app.config["LOGIN_MAX_FAILURES"]:
+                flash(
+                    f"登录失败次数过多，请 {app.config['LOGIN_LOCK_MINUTES']} 分钟后再试。",
+                    "error",
+                )
+                return render_template("admin/login.html"), 429
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "")
             admin = fetch_one("SELECT * FROM admin_users WHERE username = ?", (username,))
-            if admin and verify_secret(password, admin["password_hash"]):
+            if not (admin and verify_secret(password, admin["password_hash"])):
+                record_login_failure(client_ip)
+                app.logger.warning("Admin login failed from %s", client_ip)
+            else:
+                clear_login_failures(client_ip)
                 session.clear()
                 session["admin_user_id"] = admin["id"]
                 session["admin_username"] = admin["username"]
@@ -860,6 +883,29 @@ def expire_stale_orders() -> None:
         raise
 
 
+def _login_window_start() -> str:
+    minutes = current_app.config["LOGIN_LOCK_MINUTES"]
+    return (datetime.now(UTC) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+
+
+def login_failure_count(ip: str) -> int:
+    return fetch_one(
+        "SELECT COUNT(*) AS n FROM login_failures WHERE ip = ? AND created_at > ?",
+        (ip, _login_window_start()),
+    )["n"]
+
+
+def record_login_failure(ip: str) -> None:
+    db = get_db()
+    db.execute("INSERT INTO login_failures (ip, created_at) VALUES (?, ?)", (ip, utcnow()))
+    old = (datetime.now(UTC) - timedelta(days=1)).replace(microsecond=0).isoformat()
+    db.execute("DELETE FROM login_failures WHERE created_at < ?", (old,))
+
+
+def clear_login_failures(ip: str) -> None:
+    get_db().execute("DELETE FROM login_failures WHERE ip = ?", (ip,))
+
+
 def available_stock(product_id: int) -> int:
     row = fetch_one(
         "SELECT COUNT(*) AS n FROM cards WHERE product_id = ? AND status = 'available'",
@@ -985,14 +1031,16 @@ def create_order(
                 raise ValueError("该支付方式暂不可用，请选择其他方式。") from exc
             crypto_address = cfg.address
             # 唯一金额在写锁内分配，并发下单不会拿到相同金额。
-            crypto_amount = crypto.allocate_amount(db, provider_code, cfg, amount_cents)
+            crypto_amount = crypto.allocate_amount(
+                db, provider_code, cfg, amount_cents, product["currency"]
+            )
         cursor = db.execute(
             """
             INSERT INTO orders
                 (order_no, product_id, product_name, quantity, contact, email,
-                 query_password_hash, amount_cents, status, payment_provider,
+                 query_password_hash, amount_cents, currency, status, payment_provider,
                  crypto_amount, crypto_address, expires_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
             """,
             (
                 order_no,
@@ -1003,6 +1051,7 @@ def create_order(
                 email,
                 query_hash,
                 amount_cents,
+                product["currency"],
                 provider_code,
                 crypto_amount,
                 crypto_address,
@@ -1225,6 +1274,7 @@ def save_product(product_id: int | None = None) -> int:
     name = request.form.get("name", "").strip()
     description = request.form.get("description", "").strip()
     price_cents = yuan_to_cents(request.form.get("price", "0"))
+    currency = normalize_currency(request.form.get("currency"))
     status = request.form.get("status", "active")
     sort_order = int(request.form.get("sort_order", "100"))
     buy_limit = int(request.form.get("buy_limit", "1"))
@@ -1241,7 +1291,7 @@ def save_product(product_id: int | None = None) -> int:
         db.execute(
             """
             UPDATE products
-            SET category_id = ?, name = ?, description = ?, price_cents = ?,
+            SET category_id = ?, name = ?, description = ?, price_cents = ?, currency = ?,
                 status = ?, sort_order = ?, buy_limit = ?, updated_at = ?
             WHERE id = ?
             """,
@@ -1250,6 +1300,7 @@ def save_product(product_id: int | None = None) -> int:
                 name,
                 description,
                 price_cents,
+                currency,
                 status,
                 sort_order,
                 buy_limit,
@@ -1262,15 +1313,16 @@ def save_product(product_id: int | None = None) -> int:
     cursor = db.execute(
         """
         INSERT INTO products
-            (category_id, name, description, price_cents, status, sort_order,
+            (category_id, name, description, price_cents, currency, status, sort_order,
              buy_limit, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             category_id,
             name,
             description,
             price_cents,
+            currency,
             status,
             sort_order,
             buy_limit,

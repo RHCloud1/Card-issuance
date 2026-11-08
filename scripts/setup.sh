@@ -392,6 +392,7 @@ ADMIN_USERNAME=$(dotenv_literal "$admin_username")
 ADMIN_PASSWORD=$(dotenv_literal "$admin_password")
 ENABLE_MOCK_PAYMENTS=0
 ORDER_EXPIRE_MINUTES=$order_expire_minutes
+TRUSTED_PROXY_COUNT=$([ "$mode" = "https" ] && echo 1 || echo 0)
 CONTAINER_DNS_PRIMARY=1.1.1.1
 CONTAINER_DNS_SECONDARY=8.8.8.8
 EOF_ENV

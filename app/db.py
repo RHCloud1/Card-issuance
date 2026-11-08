@@ -64,6 +64,8 @@ def init_db() -> None:
 COLUMN_MIGRATIONS = [
     ("orders", "crypto_amount", "INTEGER"),
     ("orders", "crypto_address", "TEXT NOT NULL DEFAULT ''"),
+    ("products", "currency", "TEXT NOT NULL DEFAULT 'CNY'"),
+    ("orders", "currency", "TEXT NOT NULL DEFAULT 'CNY'"),
 ]
 
 

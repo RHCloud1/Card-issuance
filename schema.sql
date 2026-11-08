@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS products (
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     price_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'CNY',
     status TEXT NOT NULL DEFAULT 'active',
     sort_order INTEGER NOT NULL DEFAULT 100,
     buy_limit INTEGER NOT NULL DEFAULT 1,
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS orders (
     email TEXT NOT NULL DEFAULT '',
     query_password_hash TEXT NOT NULL DEFAULT '',
     amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'CNY',
     status TEXT NOT NULL DEFAULT 'pending',
     payment_provider TEXT NOT NULL DEFAULT 'mock',
     payment_trade_no TEXT NOT NULL DEFAULT '',
@@ -124,6 +126,16 @@ CREATE TABLE IF NOT EXISTS crypto_transfers (
 
 CREATE INDEX IF NOT EXISTS idx_crypto_transfers_status
 ON crypto_transfers(status, block_time);
+
+-- 后台登录失败记录，用于按 IP 限制尝试次数。
+CREATE TABLE IF NOT EXISTS login_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_failures_ip
+ON login_failures(ip, created_at);
 
 CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,

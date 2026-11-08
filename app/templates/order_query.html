@@ -29,7 +29,7 @@
                     <div class="section-head">
                         <div>
                             <h2>{{ order.product_name }} × {{ order.quantity }}</h2>
-                            <p class="muted">订单号 {{ order.order_no }} · ￥{{ order.amount_cents|yuan }}</p>
+                            <p class="muted">订单号 {{ order.order_no }} · {{ order.amount_cents|money(order.currency) }}</p>
                         </div>
                         <span class="status {{ order.status }}">{{ order.status }}</span>
                     </div>

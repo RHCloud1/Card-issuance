@@ -16,7 +16,7 @@
             <tr>
                 <td><a href="{{ url_for('checkout', order_no=order.order_no) }}">{{ order.order_no }}</a></td>
                 <td>{{ order.product_name }} × {{ order.quantity }}</td>
-                <td>￥{{ order.amount_cents|yuan }}</td>
+                <td>{{ order.amount_cents|money(order.currency) }}</td>
                 <td>{{ order.contact }}</td>
                 <td>
                     {{ order.payment_provider }}

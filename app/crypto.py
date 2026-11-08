@@ -169,9 +169,17 @@ def units_to_text(units: int | None) -> str:
 # ---------------------------------------------------------------- 唯一金额
 
 
-def allocate_amount(db, provider_code: str, cfg: CryptoConfig, amount_cents: int) -> int:
-    """在调用方已持有写锁（BEGIN IMMEDIATE）时调用，返回本订单应付的 USDT 单位数。"""
-    base = (Decimal(amount_cents) / 100 / cfg.cny_per_usdt * UNIT)
+def allocate_amount(
+    db, provider_code: str, cfg: CryptoConfig, amount_cents: int, currency: str = "CNY"
+) -> int:
+    """在调用方已持有写锁（BEGIN IMMEDIATE）时调用，返回本订单应付的 USDT 单位数。
+
+    USD / USDT 计价按 1:1 收 USDT；人民币计价按 cny_per_usdt 换算。
+    """
+    amount = Decimal(amount_cents) / 100
+    if currency == "CNY":
+        amount = amount / cfg.cny_per_usdt
+    base = amount * UNIT
     base_units = int((base / cfg.step_units).to_integral_value(rounding=ROUND_UP)) * cfg.step_units
     base_units = max(base_units, cfg.step_units)
     cooldown_since = (datetime.now(UTC) - SLOT_COOLDOWN).replace(microsecond=0).isoformat()

@@ -11,3 +11,4 @@ docker-compose.override.yml
 .pytest_cache/
 .worktrees/
 .review-artifacts/
+SESSION_NOTES.md

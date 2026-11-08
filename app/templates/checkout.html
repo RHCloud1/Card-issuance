@@ -16,7 +16,7 @@
     </div>
     <div class="summary-line">
         <span>金额</span>
-        <strong>￥{{ order.amount_cents|yuan }}</strong>
+        <strong>{{ order.amount_cents|money(order.currency) }}</strong>
     </div>
     <div class="summary-line">
         <span>支付方式</span>

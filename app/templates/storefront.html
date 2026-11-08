@@ -55,7 +55,7 @@
                         <p>{{ product.description or "暂无描述" }}</p>
                     </div>
                     <div class="product-meta">
-                        <strong>￥{{ product.price_cents|yuan }}</strong>
+                        <strong>{{ product.price_cents|money(product.currency) }}</strong>
                         <span>库存 {{ product.stock or 0 }}</span>
                     </div>
                     {% if (product.stock or 0) > 0 %}

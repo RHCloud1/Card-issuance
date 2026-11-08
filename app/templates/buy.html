@@ -9,7 +9,7 @@
     <p class="muted">{{ product.description or "暂无描述" }}</p>
     <div class="summary-line">
         <span>单价</span>
-        <strong>￥{{ product.price_cents|yuan }}</strong>
+        <strong>{{ product.price_cents|money(product.currency) }}</strong>
     </div>
     <div class="summary-line">
         <span>库存</span>

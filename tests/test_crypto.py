@@ -45,7 +45,7 @@ def iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat()
 
 
-class CryptoPaymentTests(unittest.TestCase):
+class CryptoTestBase(unittest.TestCase):
     def setUp(self):
         TEMP_ROOT.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix="crypto-", dir=TEMP_ROOT)
@@ -136,7 +136,8 @@ class CryptoPaymentTests(unittest.TestCase):
             (iso(now - created_ago), iso(now - expires_ago), order_no),
         )
 
-    # ------------------------------------------------------------ tests
+
+class CryptoPaymentTests(CryptoTestBase):
 
     def test_address_validation(self):
         self.assertTrue(crypto.is_valid_tron_address(crypto.MAINNET_USDT_CONTRACT))
@@ -299,6 +300,74 @@ class CryptoPaymentTests(unittest.TestCase):
         self.assertEqual(transfers[0].units, 1_720_000)
         self.assertIn("only_confirmed=true", seen_urls[0])
         self.assertIn("fingerprint=next", seen_urls[1])
+
+
+class CurrencyAndLoginTests(CryptoTestBase):
+    """复用上面的环境（已启用 USDT 通道、有一个人民币商品）。"""
+
+    def test_usd_and_usdt_products_are_charged_one_to_one(self):
+        for currency in ("USD", "USDT"):
+            with self.subTest(currency=currency):
+                self.execute("UPDATE products SET currency = ? WHERE id = ?", (currency, self.product))
+                order_no = self.place_order()
+                order = self.order_row(order_no)
+                self.assertEqual(order["currency"], currency)
+                # 12.34 USD/USDT -> 12.34 USDT 起，不经过人民币汇率
+                self.assertGreaterEqual(order["crypto_amount"], 12_340_000)
+                self.assertLess(order["crypto_amount"], 12_400_000)
+                page = self.client.get(f"/checkout/{order_no}").get_data(as_text=True)
+                self.assertIn("12.34", page)
+
+    def test_admin_can_choose_product_currency(self):
+        admin = self.admin_client()
+        category = self.rows("SELECT id FROM categories LIMIT 1")[0]["id"]
+        form = admin.get("/test-admin/products/new").get_data(as_text=True)
+        self.assertIn('name="currency"', form)
+        admin.post("/test-admin/products/new", data={
+            "category_id": str(category), "name": "Dollar item", "price": "9.99",
+            "currency": "usd", "status": "active", "sort_order": "100", "buy_limit": "1",
+            "csrf_token": FormTokens(form).token,
+        })
+        product = self.rows("SELECT * FROM products WHERE name = 'Dollar item'")[0]
+        self.assertEqual((product["currency"], product["price_cents"]), ("USD", 999))
+        self.assertIn("$9.99", self.client.get("/").get_data(as_text=True))
+
+    def login_attempt(self, client, password, headers=None):
+        return client.post("/test-admin/login", data={
+            "username": "operator@example.com", "password": password,
+            "csrf_token": self.token(client, "/test-admin/login"),
+        }, headers=headers or {})
+
+    def test_login_locks_after_repeated_failures(self):
+        client = self.app.test_client()
+        for _ in range(5):
+            self.assertEqual(self.login_attempt(client, "wrong").status_code, 200)
+        locked = self.login_attempt(client, "test-operator-password")
+        self.assertEqual(locked.status_code, 429)
+        self.assertNotIn("admin_user_id", self.session_of(client))
+
+    def test_forwarded_ip_is_ignored_unless_proxy_is_trusted(self):
+        client = self.app.test_client()
+        # 未配置可信代理：伪造不同的 X-Forwarded-For 也绕不过限制
+        for index in range(5):
+            self.login_attempt(client, "wrong", {"X-Forwarded-For": f"10.0.0.{index}"})
+        locked = self.login_attempt(client, "test-operator-password", {"X-Forwarded-For": "10.0.0.99"})
+        self.assertEqual(locked.status_code, 429)
+
+        with patch.dict(os.environ, {"TRUSTED_PROXY_COUNT": "1"}):
+            proxied = create_app()
+        proxied.config.update(TESTING=True)
+        client = proxied.test_client()
+        for _ in range(5):
+            self.login_attempt(client, "wrong", {"X-Forwarded-For": "203.0.113.5"})
+        other_ip = self.login_attempt(
+            client, "test-operator-password", {"X-Forwarded-For": "203.0.113.6"}
+        )
+        self.assertEqual(other_ip.status_code, 302)
+
+    def session_of(self, client):
+        with client.session_transaction() as session:
+            return dict(session)
 
 
 if __name__ == "__main__":
