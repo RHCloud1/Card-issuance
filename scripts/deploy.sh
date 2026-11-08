@@ -23,6 +23,7 @@ docker compose up -d --build
 
 app_base_url="$(get_env APP_BASE_URL)"
 admin_path="$(get_env ADMIN_PATH)"
+bash ./scripts/check-ready.sh "$app_base_url"
 
 echo
 echo "部署完成。"

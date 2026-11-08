@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}链上入账 - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="section">
+    <div class="section-head">
+        <h1>链上入账</h1>
+        <form method="post" action="{{ url_for('admin_crypto_scan') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="button secondary" type="submit" {% if not providers %}disabled{% endif %}>立即扫描</button>
+        </form>
+    </div>
+    {% if not providers %}
+        <div class="notice">还没有启用 USDT 通道。到「支付」里配置 usdt_trc20 的收款地址和汇率后启用。</div>
+    {% else %}
+        <div class="notice">
+            系统会自动按金额匹配订单。显示“未匹配”的入账通常是买家金额输错、付款太晚或与本店无关的转账；
+            核实后可填写订单号手动指派，系统会重新预占库存并发卡。
+        </div>
+    {% endif %}
+    <table>
+        <thead>
+            <tr>
+                <th>时间 (UTC)</th>
+                <th>金额 USDT</th>
+                <th>付款地址</th>
+                <th>交易号</th>
+                <th>状态</th>
+                <th>订单</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% set status_labels = {"unmatched": "未匹配", "matched": "已发卡", "late": "已记录（未发卡）", "ignored": "已忽略"} %}
+            {% for t in transfers %}
+                <tr>
+                    <td>{{ t.block_time }}</td>
+                    <td>{{ t.amount_units|usdt }}</td>
+                    <td><code>{{ t.from_address }}</code></td>
+                    <td><a href="https://tronscan.org/#/transaction/{{ t.tx_id }}" target="_blank" rel="noopener noreferrer"><code>{{ t.tx_id[:10] }}…{{ t.tx_id[-6:] }}</code></a></td>
+                    <td>{{ status_labels.get(t.status, t.status) }}</td>
+                    <td>
+                        {% if t.order_no %}
+                            <a href="{{ url_for('checkout', order_no=t.order_no) }}">{{ t.order_no }}</a>
+                        {% endif %}
+                        {% if t.status in ("unmatched", "late") %}
+                            <form class="inline-assign" method="post" action="{{ url_for('admin_crypto_assign', transfer_id=t.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <input type="text" name="order_no" placeholder="订单号" value="{{ t.order_no or '' }}" required>
+                                <button class="link-button" type="submit">指派并发卡</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6">暂无链上入账记录。</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS products (
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     price_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'CNY',
     status TEXT NOT NULL DEFAULT 'active',
     sort_order INTEGER NOT NULL DEFAULT 100,
     buy_limit INTEGER NOT NULL DEFAULT 1,
@@ -60,9 +61,12 @@ CREATE TABLE IF NOT EXISTS orders (
     email TEXT NOT NULL DEFAULT '',
     query_password_hash TEXT NOT NULL DEFAULT '',
     amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'CNY',
     status TEXT NOT NULL DEFAULT 'pending',
     payment_provider TEXT NOT NULL DEFAULT 'mock',
     payment_trade_no TEXT NOT NULL DEFAULT '',
+    crypto_amount INTEGER,
+    crypto_address TEXT NOT NULL DEFAULT '',
     delivered_content TEXT NOT NULL DEFAULT '',
     error_message TEXT NOT NULL DEFAULT '',
     expires_at TEXT NOT NULL,
@@ -101,6 +105,41 @@ CREATE TABLE IF NOT EXISTS payment_events (
     payload TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     UNIQUE (provider_code, trade_no)
+);
+
+-- 链上入账（USDT-TRC20 等）。amount_units 为 6 位小数的整数单位。
+CREATE TABLE IF NOT EXISTS crypto_transfers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_code TEXT NOT NULL,
+    tx_id TEXT NOT NULL,
+    from_address TEXT NOT NULL DEFAULT '',
+    to_address TEXT NOT NULL,
+    amount_units INTEGER NOT NULL,
+    block_time TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unmatched',
+    order_no TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (provider_code, tx_id),
+    CHECK (status IN ('unmatched', 'matched', 'late', 'ignored'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_crypto_transfers_status
+ON crypto_transfers(status, block_time);
+
+-- 后台登录失败记录，用于按 IP 限制尝试次数。
+CREATE TABLE IF NOT EXISTS login_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_failures_ip
+ON login_failures(ip, created_at);
+
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS support_tickets (

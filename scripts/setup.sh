@@ -213,6 +213,15 @@ PY
   fi
 }
 
+# Compose interprets $ and double-quoted escape sequences while loading .env.
+dotenv_literal() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//\$/\$\$}"
+  printf '"%s"' "$value"
+}
+
 random_suffix() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 5
@@ -374,14 +383,16 @@ EOF_COMPOSE
 fi
 
 cat > .env <<EOF_ENV
-APP_NAME=$app_name
+APP_NAME=$(dotenv_literal "$app_name")
 APP_SECRET=$app_secret
 APP_BASE_URL=$app_base_url
 DATABASE_PATH=/data/card_issuance.sqlite3
 ADMIN_PATH=$admin_path
-ADMIN_USERNAME=$admin_username
-ADMIN_PASSWORD=$admin_password
+ADMIN_USERNAME=$(dotenv_literal "$admin_username")
+ADMIN_PASSWORD=$(dotenv_literal "$admin_password")
+ENABLE_MOCK_PAYMENTS=0
 ORDER_EXPIRE_MINUTES=$order_expire_minutes
+TRUSTED_PROXY_COUNT=$([ "$mode" = "https" ] && echo 1 || echo 0)
 CONTAINER_DNS_PRIMARY=1.1.1.1
 CONTAINER_DNS_SECONDARY=8.8.8.8
 EOF_ENV
@@ -391,27 +402,7 @@ mkdir -p data backups
 
 docker compose up -d --build
 
-if [ "$mode" = "https" ]; then
-  https_ready=false
-  for ((attempt = 1; attempt <= 12; attempt++)); do
-    if curl --silent --show-error --fail --head \
-      --max-time 5 \
-      --resolve "$domain:443:127.0.0.1" \
-      "https://$domain/"; then
-      https_ready=true
-      break
-    fi
-    sleep 5
-  done
-
-  if [ "$https_ready" != true ]; then
-    echo "HTTPS 尚未就绪，已达到等待上限。保留容器以便诊断。" >&2
-    echo "最近的 Caddy 日志：" >&2
-    docker compose logs --tail=100 caddy >&2 || true
-    echo "请运行 ./scripts/diagnose.sh 继续诊断。" >&2
-    exit 1
-  fi
-fi
+bash ./scripts/check-ready.sh "$app_base_url"
 
 echo
 echo "部署完成。"

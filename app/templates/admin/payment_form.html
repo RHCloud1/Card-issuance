@@ -20,7 +20,17 @@
         <label>
             配置 JSON
             <textarea name="config_json" rows="14" spellcheck="false">{{ provider.config_json }}</textarea>
+            {% if provider.provider_type == "usdt_trc20" %}
+            <small>
+                <b>address</b>：你的 TRON 收款地址（T 开头；只填地址，绝不要填私钥或助记词）。
+                <b>cny_per_usdt</b>：1 USDT 折合多少人民币，下单时按此换算并锁定金额。
+                <b>amount_step</b>：区分订单的尾数步长，默认 0.01；同一时间最多 <b>max_slots</b> 笔待付订单，最多多收 step × max_slots。
+                <b>trongrid_api_key</b>：选填，可在 trongrid.io 免费申请以提高查询额度。
+                <b>api_base</b> / <b>token_contract</b>：一般不用改；测试时可改成 Nile 测试网。
+            </small>
+            {% else %}
             <small>可填写 app_id、merchant_id、private_key、public_key、notify_url、return_url、api_endpoint 等字段；不同支付通道需要的字段可以不同。</small>
+            {% endif %}
         </label>
         <label class="checkbox">
             <input type="checkbox" name="is_enabled" {% if provider.is_enabled %}checked{% endif %}>

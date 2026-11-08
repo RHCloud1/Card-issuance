@@ -5,11 +5,13 @@ import functools
 import hashlib
 import hmac
 import secrets
+from urllib.parse import unquote, urlsplit
 
 from flask import abort, redirect, request, session, url_for
 
 
 PBKDF2_ITERATIONS = 260_000
+MAX_AUTHORIZED_ORDERS = 50
 
 
 def hash_secret(value: str) -> str:
@@ -58,6 +60,40 @@ def require_csrf() -> None:
     submitted = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
     if not token or not submitted or not hmac.compare_digest(token, submitted):
         abort(400, "Invalid CSRF token")
+
+
+def authorize_order(order_no: str) -> None:
+    """Grant this signed browser session access to one order only."""
+    authorized = list(session.get("authorized_orders", []))
+    if order_no in authorized:
+        authorized.remove(order_no)
+    authorized.append(order_no)
+    session["authorized_orders"] = authorized[-MAX_AUTHORIZED_ORDERS:]
+
+
+def can_reveal_order(order) -> bool:
+    return not order["query_password_hash"] or order["order_no"] in session.get(
+        "authorized_orders", []
+    )
+
+
+def safe_redirect_path(target: str | None, fallback: str) -> str:
+    """Accept only a local absolute path, including after URL decoding."""
+    if not target:
+        return fallback
+    decoded = unquote(target)
+    if (
+        not target.startswith("/")
+        or decoded.startswith("//")
+        or "\\" in decoded
+        or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+    ):
+        return fallback
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return fallback
+    return target if not parsed.scheme and not parsed.netloc else fallback
 
 
 def login_required(view):

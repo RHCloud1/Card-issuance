@@ -2,6 +2,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+mkdir -p "$repo_root/.review-artifacts/tmp"
+test_tmp_root="$(cd "$repo_root/.review-artifacts/tmp" && pwd -P)"
+real_docker="$(command -v docker || true)"
 fixture=""
 setup_status=0
 diagnose_status=0
@@ -44,17 +47,24 @@ assert_line_count() {
 
 cleanup_fixture() {
   if [ -n "$fixture" ] && [ -d "$fixture" ]; then
-    rm -rf "$fixture"
+    case "$fixture" in
+      "$test_tmp_root"/deployment.*) rm -rf -- "$fixture" ;;
+      *) fail "refusing to remove fixture outside $test_tmp_root" ;;
+    esac
   fi
   fixture=""
 }
 
 make_fixture() {
   cleanup_fixture
-  fixture="$(mktemp -d)"
+  fixture="$(mktemp -d "$test_tmp_root/deployment.XXXXXXXX")"
   mkdir -p "$fixture/scripts" "$fixture/fake-bin"
   cp "$repo_root/scripts/setup.sh" "$fixture/scripts/setup.sh"
   cp "$repo_root/scripts/diagnose.sh" "$fixture/scripts/diagnose.sh"
+  cp "$repo_root/scripts/check-ready.sh" "$fixture/scripts/check-ready.sh"
+  cp "$repo_root/scripts/deploy.sh" "$fixture/scripts/deploy.sh"
+  cp "$repo_root/scripts/update.sh" "$fixture/scripts/update.sh"
+  cp "$repo_root/scripts/backup.py" "$fixture/scripts/backup.py"
   cp "$repo_root/docker-compose.yml" "$fixture/docker-compose.yml"
 
   cat > "$fixture/fake-bin/docker" <<'EOF'
@@ -129,8 +139,24 @@ if [ "${1:-}" = "compose" ] && [ "${2:-}" = "version" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "compose" ] && [ "${2:-}" = "config" ]; then
+  printf '%s\n' card-issuance
+  if [ -f docker-compose.override.yml ] && grep -F '  caddy:' docker-compose.override.yml >/dev/null; then
+    printf '%s\n' caddy
+  fi
+  exit 0
+fi
+
 if [ "${1:-}" = "compose" ] && [ "${2:-}" = "exec" ]; then
   case "${5:-}" in
+    python)
+      if [ "${6:-}" = "-" ]; then
+        [ "${FAKE_BACKUP_RESULT:-success}" = success ] || exit 1
+        printf '%s\n' 'SQLite snapshot fixture'
+      elif [ "${FAKE_APP_RESULT:-success}" != success ]; then
+        exit 1
+      fi
+      ;;
     cat)
       printf '%s\n' 'nameserver 1.1.1.1'
       ;;
@@ -203,8 +229,14 @@ EOF
 exit 0
 EOF
 
+  cat > "$fixture/fake-bin/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'git %s\n' "$*" >> "$FAKE_DOCKER_LOG"
+EOF
+
   chmod +x "$fixture/fake-bin/docker" "$fixture/fake-bin/ss" "$fixture/fake-bin/curl" \
-    "$fixture/fake-bin/nslookup" "$fixture/fake-bin/sleep"
+    "$fixture/fake-bin/nslookup" "$fixture/fake-bin/sleep" "$fixture/fake-bin/git"
   export FAKE_DOCKER_LOG="$fixture/docker.log"
   export FAKE_CURL_LOG="$fixture/curl.log"
   export FAKE_NSLOOKUP_LOG="$fixture/nslookup.log"
@@ -221,10 +253,12 @@ EOF
   export FAKE_CURL_INSECURE_RESULT=success
   export FAKE_DNS_RESULT=success
   export FAKE_APP_RESULT=success
+  export FAKE_BACKUP_RESULT=success
 }
 
 run_https_setup() {
   local output="$fixture/setup.out"
+  local password="${TEST_ADMIN_PASSWORD:-correct-horse-battery-staple}"
   set +e
   printf '%s\n' \
     '1' \
@@ -232,8 +266,8 @@ run_https_setup() {
     '' \
     '' \
     'admin@example.com' \
-    'correct-horse-battery-staple' \
-    'correct-horse-battery-staple' \
+    "$password" \
+    "$password" \
     'card.example.test' \
     '' \
     | (cd "$fixture" && PATH="$fixture/fake-bin:$PATH" bash ./scripts/setup.sh) > "$output" 2>&1
@@ -534,6 +568,169 @@ test_maintenance_scripts_include_chinese_output_and_dns_diagnostics() {
   assert_not_contains "$repo_root/README.md" '脚本结束时输出的 `Admin`'
 }
 
+test_setup_preserves_password_literals() {
+  make_fixture
+  local password
+  printf -v password '%s' 'dollar$HOME${HOME} $$ "double" ' "'" 'single' "'" ' C:\cards\ ends\'
+  TEST_ADMIN_PASSWORD="$password" run_https_setup
+  assert_success
+  cat > "$fixture/password.expected" <<'EOF'
+ADMIN_PASSWORD="dollar$$HOME$${HOME} $$$$ \"double\" 'single' C:\\cards\\ ends\\"
+EOF
+  assert_contains "$fixture/.env" "$(cat "$fixture/password.expected")"
+  assert_contains "$fixture/.env" 'ENABLE_MOCK_PAYMENTS=0'
+
+  # Compose config parses .env without starting Docker or requiring a daemon.
+  if [ -n "$real_docker" ] && "$real_docker" compose version >/dev/null 2>&1; then
+    cat > "$fixture/compose-password.yml" <<'EOF'
+services:
+  check:
+    image: busybox
+    environment:
+      CHECK: ${ADMIN_PASSWORD}
+EOF
+    (cd "$fixture" && env -u ADMIN_PASSWORD \
+      "$real_docker" compose --env-file .env -f compose-password.yml config --environment \
+      | grep '^ADMIN_PASSWORD=') \
+      > "$fixture/compose-password.env"
+    assert_contains "$fixture/compose-password.env" "ADMIN_PASSWORD=$password"
+  else
+    printf 'SKIP: real Compose password parser check (Compose not installed)\n'
+  fi
+}
+
+test_setup_rejects_unready_http_application() {
+  make_fixture
+  export FAKE_APP_RESULT=failure
+  set +e
+  printf '%s\n' '2' '' '' '' 'admin@example.com' 'test-password' 'test-password' \
+    '127.0.0.1' '8080' \
+    | (cd "$fixture" && PATH="$fixture/fake-bin:$PATH" bash ./scripts/setup.sh) \
+      > "$fixture/setup.out" 2>&1
+  setup_status=$?
+  set -e
+  assert_failure
+  assert_contains "$fixture/setup.out" '应用 HTTP 服务尚未就绪'
+  assert_not_contains "$fixture/setup.out" '部署完成'
+}
+
+prepare_update_fixture() {
+  make_fixture
+  mkdir -p "$fixture/.git" "$fixture/data"
+  printf '%s\n' 'live database fixture' > "$fixture/data/card_issuance.sqlite3"
+  printf '%s\n' 'live WAL fixture' > "$fixture/data/card_issuance.sqlite3-wal"
+  cat > "$fixture/.env" <<'EOF'
+APP_BASE_URL=http://127.0.0.1:8080
+ADMIN_PATH=/admin-test
+EOF
+  cat > "$fixture/docker-compose.override.yml" <<'EOF'
+services:
+  card-issuance:
+    ports:
+      - "8080:8080"
+EOF
+}
+
+run_maintenance() {
+  local script="$1"
+  set +e
+  (cd "$fixture" && PATH="$fixture/fake-bin:$PATH" bash "./scripts/$script.sh") \
+    > "$fixture/$script.out" 2>&1
+  maintenance_status=$?
+  set -e
+}
+
+test_update_archives_online_snapshot_only() {
+  prepare_update_fixture
+  run_maintenance update
+  [ "$maintenance_status" -eq 0 ] || fail 'expected healthy update to succeed'
+  local archives=("$fixture"/backups/data-*.tar.gz)
+  [ -f "${archives[0]}" ] || fail 'update did not create an archive'
+  [ "$(tar -tzf "${archives[0]}")" = 'data/card_issuance.sqlite3' ] \
+    || fail 'archive contained live WAL files instead of a standalone snapshot'
+  [ "$(tar -xOzf "${archives[0]}" data/card_issuance.sqlite3)" = 'SQLite snapshot fixture' ] \
+    || fail 'archive did not contain the online snapshot'
+  assert_contains "$FAKE_DOCKER_LOG" 'compose exec -T card-issuance python - --output -'
+  assert_contains "$FAKE_DOCKER_LOG" 'git pull --ff-only'
+  assert_contains "$fixture/update.out" '更新完成'
+}
+
+test_update_aborts_before_pull_when_backup_fails() {
+  prepare_update_fixture
+  export FAKE_BACKUP_RESULT=failure
+  run_maintenance update
+  [ "$maintenance_status" -ne 0 ] || fail 'expected failed backup to abort update'
+  assert_not_contains "$FAKE_DOCKER_LOG" 'git pull'
+  assert_not_contains "$FAKE_DOCKER_LOG" 'compose up'
+  assert_not_contains "$fixture/update.out" '更新完成'
+  if compgen -G "$fixture/backups/data-*.tar.gz" >/dev/null; then
+    fail 'failed backup left a successful-looking archive'
+  fi
+  if compgen -G "$fixture/backups/.snapshot-*" >/dev/null; then
+    fail 'failed backup left a temporary snapshot directory'
+  fi
+}
+
+test_update_uses_configured_database_without_sqlite3_filename() {
+  prepare_update_fixture
+  mv "$fixture/data/card_issuance.sqlite3" "$fixture/data/custom.db"
+  rm "$fixture/data/card_issuance.sqlite3-wal"
+  printf '%s\n' 'DATABASE_PATH=/data/custom.db' >> "$fixture/.env"
+  run_maintenance update
+  [ "$maintenance_status" -eq 0 ] || fail 'expected configured database backup to succeed'
+  assert_contains "$FAKE_DOCKER_LOG" 'compose exec -T card-issuance python - --output -'
+  local archives=("$fixture"/backups/data-*.tar.gz)
+  [ -f "${archives[0]}" ] || fail 'custom database path bypassed the backup'
+}
+
+test_update_rejects_unready_application() {
+  prepare_update_fixture
+  export FAKE_APP_RESULT=failure
+  run_maintenance update
+  [ "$maintenance_status" -ne 0 ] || fail 'expected unready update to fail'
+  assert_contains "$fixture/update.out" '应用 HTTP 服务尚未就绪'
+  assert_not_contains "$fixture/update.out" '更新完成'
+  assert_not_contains "$FAKE_DOCKER_LOG" 'image prune'
+}
+
+test_update_rejects_unready_https() {
+  prepare_update_fixture
+  printf '%s\n' 'APP_BASE_URL=https://card.example.test' 'ADMIN_PATH=/admin-test' > "$fixture/.env"
+  printf '%s\n' 'services:' '  caddy:' '    image: caddy:2-alpine' > "$fixture/docker-compose.override.yml"
+  export FAKE_CURL_TLS_RESULT=failure
+  run_maintenance update
+  [ "$maintenance_status" -ne 0 ] || fail 'expected failed TLS check to abort update'
+  assert_contains "$fixture/update.out" 'HTTPS 尚未就绪'
+  assert_not_contains "$fixture/update.out" '更新完成'
+}
+
+test_deploy_rejects_unready_application() {
+  prepare_update_fixture
+  export FAKE_APP_RESULT=failure
+  run_maintenance deploy
+  [ "$maintenance_status" -ne 0 ] || fail 'expected unready deployment to fail'
+  assert_contains "$fixture/deploy.out" '应用 HTTP 服务尚未就绪'
+  assert_not_contains "$fixture/deploy.out" '部署完成'
+}
+
+test_docker_installer_selects_matching_distribution() {
+  make_fixture
+  sed -n '/^docker_repository_for_distribution() {$/,/^}$/p' \
+    "$repo_root/scripts/install-docker-ubuntu.sh" > "$fixture/distribution.sh"
+  # Only the pure selector is sourced; no host installation commands are run.
+  source "$fixture/distribution.sh"
+  [ "$(docker_repository_for_distribution ubuntu noble)" = 'https://download.docker.com/linux/ubuntu' ] \
+    || fail 'Ubuntu selected the wrong Docker repository'
+  [ "$(docker_repository_for_distribution debian bookworm)" = 'https://download.docker.com/linux/debian' ] \
+    || fail 'Debian selected the wrong Docker repository'
+  if docker_repository_for_distribution fedora stable >/dev/null 2>&1; then
+    fail 'unsupported distribution was accepted'
+  fi
+  if docker_repository_for_distribution ubuntu '' >/dev/null 2>&1; then
+    fail 'missing release codename was accepted'
+  fi
+}
+
 trap cleanup_fixture EXIT
 
 tests=(
@@ -556,6 +753,15 @@ tests=(
   test_diagnose_reports_caddy_or_port_failure
   test_diagnose_remains_read_only
   test_maintenance_scripts_include_chinese_output_and_dns_diagnostics
+  test_setup_preserves_password_literals
+  test_setup_rejects_unready_http_application
+  test_update_archives_online_snapshot_only
+  test_update_aborts_before_pull_when_backup_fails
+  test_update_uses_configured_database_without_sqlite3_filename
+  test_update_rejects_unready_application
+  test_update_rejects_unready_https
+  test_deploy_rejects_unready_application
+  test_docker_installer_selects_matching_distribution
 )
 
 if [ "$#" -gt 0 ]; then

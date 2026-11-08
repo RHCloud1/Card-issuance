@@ -27,6 +27,15 @@
             <input type="text" name="price" value="{{ product.price_cents|yuan if product else '0.00' }}" required>
         </label>
         <label>
+            计价货币
+            <select name="currency">
+                {% for code, info in currencies.items() %}
+                    <option value="{{ code }}" {% if (product.currency if product else 'CNY') == code %}selected{% endif %}>{{ info[2] }}</option>
+                {% endfor %}
+            </select>
+            <small>选 USD 或 USDT 时，买家用 USDT 付款按 1:1 收取；选人民币时按 USDT 通道配置的汇率换算。</small>
+        </label>
+        <label>
             单次限购
             <input type="number" name="buy_limit" value="{{ product.buy_limit if product else 1 }}" min="1">
         </label>

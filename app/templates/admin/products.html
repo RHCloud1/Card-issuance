@@ -27,7 +27,7 @@
                     <td>{{ product.id }}</td>
                     <td>{{ product.name }}</td>
                     <td>{{ product.category_name or "-" }}</td>
-                    <td>￥{{ product.price_cents|yuan }}</td>
+                    <td>{{ product.price_cents|money(product.currency) }}</td>
                     <td>{{ product.sort_order }}</td>
                     <td>
                         可售 {{ product.available_cards or 0 }} /
