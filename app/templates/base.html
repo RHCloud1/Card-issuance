@@ -38,6 +38,7 @@
             <a href="{{ url_for('admin_orders') }}">订单</a>
             <a href="{{ url_for('admin_tickets') }}">工单</a>
             <a href="{{ url_for('admin_payments') }}">支付</a>
+            <a href="{{ url_for('admin_crypto_transfers') }}">链上入账</a>
             <form action="{{ url_for('admin_logout') }}" method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="link-button">退出</button>

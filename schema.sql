@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL DEFAULT 'pending',
     payment_provider TEXT NOT NULL DEFAULT 'mock',
     payment_trade_no TEXT NOT NULL DEFAULT '',
+    crypto_amount INTEGER,
+    crypto_address TEXT NOT NULL DEFAULT '',
     delivered_content TEXT NOT NULL DEFAULT '',
     error_message TEXT NOT NULL DEFAULT '',
     expires_at TEXT NOT NULL,
@@ -101,6 +103,31 @@ CREATE TABLE IF NOT EXISTS payment_events (
     payload TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     UNIQUE (provider_code, trade_no)
+);
+
+-- 链上入账（USDT-TRC20 等）。amount_units 为 6 位小数的整数单位。
+CREATE TABLE IF NOT EXISTS crypto_transfers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_code TEXT NOT NULL,
+    tx_id TEXT NOT NULL,
+    from_address TEXT NOT NULL DEFAULT '',
+    to_address TEXT NOT NULL,
+    amount_units INTEGER NOT NULL,
+    block_time TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unmatched',
+    order_no TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (provider_code, tx_id),
+    CHECK (status IN ('unmatched', 'matched', 'late', 'ignored'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_crypto_transfers_status
+ON crypto_transfers(status, block_time);
+
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS support_tickets (

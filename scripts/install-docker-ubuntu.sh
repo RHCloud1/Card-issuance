@@ -19,19 +19,39 @@ run_as_root() {
   fi
 }
 
+docker_repository_for_distribution() {
+  local distribution="$1"
+  local codename="$2"
+  case "$distribution" in
+    ubuntu|debian) ;;
+    *)
+      echo "不支持的系统：${distribution:-unknown}。仅支持 Ubuntu/Debian。" >&2
+      return 1
+      ;;
+  esac
+  if ! [[ "$codename" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    echo "无法确认系统版本代号，已停止安装 Docker。" >&2
+    return 1
+  fi
+  printf 'https://download.docker.com/linux/%s' "$distribution"
+}
+
+# Select the matching official repository before changing the host.
+. /etc/os-release
+docker_repository_url="$(docker_repository_for_distribution "${ID:-}" "${VERSION_CODENAME:-}")"
+
 run_as_root apt-get update
 run_as_root apt-get install -y ca-certificates curl gnupg git
 
 run_as_root install -m 0755 -d /etc/apt/keyrings
 tmp_key="$(mktemp)"
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o "$tmp_key"
+curl -fsSL "$docker_repository_url/gpg" -o "$tmp_key"
 run_as_root gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg "$tmp_key"
 rm -f "$tmp_key"
 run_as_root chmod a+r /etc/apt/keyrings/docker.gpg
 
-. /etc/os-release
 echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $docker_repository_url ${VERSION_CODENAME} stable" \
   | run_as_root tee /etc/apt/sources.list.d/docker.list >/dev/null
 
 run_as_root apt-get update

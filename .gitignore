@@ -10,3 +10,4 @@ Caddyfile
 docker-compose.override.yml
 .pytest_cache/
 .worktrees/
+.review-artifacts/

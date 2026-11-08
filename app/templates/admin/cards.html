@@ -41,7 +41,7 @@
                     <td>{{ card.status }}</td>
                     <td>{{ card.order_id or "-" }}</td>
                     <td>
-                        {% if card.status != "sold" and card.status != "void" %}
+                        {% if card.status == "available" %}
                             <form method="post" action="{{ url_for('admin_card_void', card_id=card.id) }}">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 <button class="link-button danger" type="submit">作废</button>

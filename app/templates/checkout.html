@@ -27,23 +27,117 @@
         <div class="notice">
             请在 {{ order.expires_at }} 前完成支付。订单过期后预占卡密会自动释放。
         </div>
-        {% if order.payment_provider == "mock" %}
+        {% if mock_payment_available %}
             <form method="post" action="{{ url_for('mock_payment_succeed', order_no=order.order_no) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button class="button" type="submit">模拟支付成功并自动发卡</button>
             </form>
+        {% elif crypto_payment %}
+            <div class="crypto-pay" id="cryptoPay" data-status-url="{{ url_for('checkout_status', order_no=order.order_no) }}">
+                <div class="crypto-amount">
+                    <span>请转账</span>
+                    <strong id="cryptoAmount">{{ crypto_payment.amount }}</strong>
+                    <span>{{ crypto_payment.token }}</span>
+                    <button class="link-button" type="button" data-copy="{{ crypto_payment.amount }}">复制金额</button>
+                </div>
+                <div class="summary-line">
+                    <span>网络</span>
+                    <strong>{{ crypto_payment.network }}</strong>
+                </div>
+                <div class="crypto-address">
+                    {% if crypto_payment.qr_svg %}
+                        <div class="qr">{{ crypto_payment.qr_svg|safe }}</div>
+                    {% endif %}
+                    <div>
+                        <span class="muted">收款地址</span>
+                        <code id="cryptoAddress">{{ crypto_payment.address }}</code>
+                        <button class="link-button" type="button" data-copy="{{ crypto_payment.address }}">复制地址</button>
+                    </div>
+                </div>
+                <ul class="crypto-tips">
+                    <li>到账金额必须<strong>精确等于 {{ crypto_payment.amount }} USDT</strong>，系统按金额识别订单，多付少付都无法自动发卡。</li>
+                    <li>只支持 <strong>TRC20</strong> 网络的 USDT，请勿使用 ERC20 / BEP20 等其他网络转账。</li>
+                    <li>从交易所提币时，如果手续费从提币金额中扣除，请把手续费加到提币金额上，保证到账金额准确。</li>
+                    <li>链上确认后通常 1 分钟内自动发卡，本页面会自动刷新，无需重复付款。</li>
+                </ul>
+                <p class="muted" id="cryptoWaiting">正在等待链上到账…</p>
+            </div>
+        {% elif order.payment_provider == "mock" %}
+            <div class="notice error">模拟支付已关闭，请联系管理员或重新选择支付方式下单。</div>
         {% else %}
             <div class="notice">
                 当前支付通道尚未接入真实网关。后续会在这里跳转到支付宝/微信收银台。
             </div>
         {% endif %}
     {% elif order.status == "fulfilled" %}
-        <h2>卡密</h2>
-        <pre class="card-output">{{ order.delivered_content }}</pre>
+        {% if reveal_cards %}
+            <h2>卡密</h2>
+            <pre class="card-output">{{ order.delivered_content }}</pre>
+        {% else %}
+            <div class="notice">该订单设置过取卡密码，请验证密码后查看卡密。</div>
+        {% endif %}
     {% elif order.status == "expired" %}
         <div class="notice error">订单已过期，请重新下单。</div>
     {% else %}
         <div class="notice error">订单异常：{{ order.error_message or "请联系管理员处理。" }}</div>
     {% endif %}
+
+    {% if not reveal_cards %}
+        <form class="form" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label>
+                取卡密码
+                <input type="password" name="query_password" autocomplete="current-password" required maxlength="20">
+            </label>
+            <button class="button" type="submit">验证取卡密码</button>
+        </form>
+    {% endif %}
 </section>
+{% if crypto_payment and order.status == "pending" %}
+<script>
+    (function () {
+        document.querySelectorAll("[data-copy]").forEach(function (button) {
+            button.addEventListener("click", function () {
+                var text = button.getAttribute("data-copy");
+                var label = button.textContent;
+                function done() {
+                    button.textContent = "已复制";
+                    setTimeout(function () { button.textContent = label; }, 1500);
+                }
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(text).then(done);
+                } else {
+                    var input = document.createElement("textarea");
+                    input.value = text;
+                    document.body.appendChild(input);
+                    input.select();
+                    document.execCommand("copy");
+                    input.remove();
+                    done();
+                }
+            });
+        });
+
+        var box = document.getElementById("cryptoPay");
+        var url = box.getAttribute("data-status-url");
+        var waiting = document.getElementById("cryptoWaiting");
+        var checks = 0;
+        function poll() {
+            fetch(url, { headers: { "Accept": "application/json" }, cache: "no-store" })
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    if (data.status !== "pending") {
+                        window.location.reload();
+                        return;
+                    }
+                    checks += 1;
+                    waiting.textContent = "正在等待链上到账…（已检查 " + checks + " 次）";
+                    setTimeout(poll, 10000);
+                })
+                .catch(function () { setTimeout(poll, 15000); });
+        }
+        setTimeout(poll, 5000);
+    })();
+</script>
+{% endif %}
 {% endblock %}

@@ -16,6 +16,12 @@
         <strong>{{ stock }}</strong>
     </div>
 
+    {% if not providers %}
+        <div class="notice error">当前暂无可用支付方式，请稍后再试或联系站点客服。</div>
+    {% elif stock < 1 %}
+        <div class="notice">该商品暂时缺货，请稍后再试。</div>
+    {% endif %}
+
     <form class="form" method="post" action="{{ url_for('create_order_route') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="product_id" value="{{ product.id }}">
@@ -29,25 +35,25 @@
         <label>
             联系邮箱
             <input type="email" name="contact" placeholder="用于订单查询和售后工单" required>
-            <small>后续会预留邮箱验证码校验；当前用于订单查询、工单绑定和必要通知。</small>
+            <small>用于查询订单和提交售后工单，请保存下单时使用的邮箱。</small>
         </label>
 
         <label>
             取卡密码（选填）
-            <input type="text" name="query_password" placeholder="选填，6-20 位">
-            <small>如果填写，之后查询订单并查看卡密时需要同时输入这个密码；不填写则仅凭联系邮箱和订单号查询。</small>
+            <input type="password" name="query_password" autocomplete="new-password" minlength="6" maxlength="20" placeholder="选填，6-20 位">
+            <small>请保存取卡密码，在其他设备取卡时需要验证；留空可凭联系邮箱查询卡密。</small>
         </label>
 
         <label>
             支付方式
-            <select name="payment_provider" required>
+            <select name="payment_provider" required {% if not providers %}disabled{% endif %}>
                 {% for provider in providers %}
                     <option value="{{ provider.code }}">{{ provider.name }}</option>
                 {% endfor %}
             </select>
         </label>
 
-        <button class="button" type="submit">创建订单</button>
+        <button class="button" type="submit" {% if not providers or stock < 1 %}disabled{% endif %}>创建订单</button>
     </form>
 </section>
 {% endblock %}

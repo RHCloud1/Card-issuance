@@ -6,6 +6,7 @@
 <section class="section">
     <h1>订单管理</h1>
     {% set recent_orders = orders %}
+    {% set show_order_actions = true %}
     {% include "admin/order_table.html" with context %}
 </section>
 {% endblock %}

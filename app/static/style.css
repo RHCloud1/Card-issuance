@@ -626,3 +626,74 @@ code {
         white-space: nowrap;
     }
 }
+
+/* USDT 收款 */
+.crypto-pay {
+    margin: 16px 0;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel-alt);
+}
+
+.crypto-amount {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 8px;
+}
+
+.crypto-amount strong {
+    font-size: 30px;
+    color: var(--primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.crypto-address {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: center;
+    margin: 14px 0;
+}
+
+.crypto-address > div:last-child {
+    flex: 1 1 220px;
+    min-width: 0;
+}
+
+.crypto-address code {
+    display: block;
+    margin: 4px 0;
+    font-size: 15px;
+    word-break: break-all;
+}
+
+.crypto-address .qr svg {
+    display: block;
+    border-radius: 6px;
+}
+
+.crypto-tips {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--muted);
+    line-height: 1.7;
+}
+
+.inline-assign {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin: 0;
+}
+
+.inline-assign input {
+    width: 140px;
+    padding: 6px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--input-bg);
+    color: var(--text);
+}

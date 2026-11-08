@@ -8,6 +8,7 @@
             <th>支付</th>
             <th>状态</th>
             <th>时间</th>
+            {% if show_order_actions %}<th>操作</th>{% endif %}
         </tr>
     </thead>
     <tbody>
@@ -17,12 +18,29 @@
                 <td>{{ order.product_name }} × {{ order.quantity }}</td>
                 <td>￥{{ order.amount_cents|yuan }}</td>
                 <td>{{ order.contact }}</td>
-                <td>{{ order.payment_provider }}</td>
-                <td>{{ order.status }}</td>
+                <td>
+                    {{ order.payment_provider }}
+                    {% if order.crypto_amount %}<br><small class="muted">{{ order.crypto_amount|usdt }} USDT</small>{% endif %}
+                </td>
+                <td>
+                    {{ order.status }}
+                    {% if order.error_message %}<br><small class="muted">{{ order.error_message }}</small>{% endif %}
+                </td>
                 <td>{{ order.created_at }}</td>
+                {% if show_order_actions %}
+                    <td>
+                        {% if order.status in ("pending", "expired", "abnormal") and order.payment_provider != "mock" %}
+                            <form class="inline-assign" method="post" action="{{ url_for('admin_order_confirm_paid', order_no=order.order_no) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <input type="text" name="reference" placeholder="收款凭证/交易号" value="{{ order.payment_trade_no }}" required>
+                                <button class="link-button" type="submit">确认收款并发卡</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                {% endif %}
             </tr>
         {% else %}
-            <tr><td colspan="7">暂无订单。</td></tr>
+            <tr><td colspan="{{ 8 if show_order_actions else 7 }}">暂无订单。</td></tr>
         {% endfor %}
     </tbody>
 </table>
