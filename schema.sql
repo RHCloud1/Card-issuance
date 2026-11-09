@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS admin_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    -- 退出登录或改密码时递增，使所有旧会话 Cookie 失效。
+    session_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
 
@@ -67,6 +69,7 @@ CREATE TABLE IF NOT EXISTS orders (
     payment_trade_no TEXT NOT NULL DEFAULT '',
     crypto_amount INTEGER,
     crypto_address TEXT NOT NULL DEFAULT '',
+    client_ip TEXT NOT NULL DEFAULT '',
     delivered_content TEXT NOT NULL DEFAULT '',
     error_message TEXT NOT NULL DEFAULT '',
     expires_at TEXT NOT NULL,
@@ -136,6 +139,17 @@ CREATE TABLE IF NOT EXISTS login_failures (
 
 CREATE INDEX IF NOT EXISTS idx_login_failures_ip
 ON login_failures(ip, created_at);
+
+-- 前台访问频率限制（查单/取卡密码失败、下单次数等），按 bucket + key 计数。
+CREATE TABLE IF NOT EXISTS rate_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bucket TEXT NOT NULL,
+    key TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_events_lookup
+ON rate_events(bucket, key, created_at);
 
 CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,

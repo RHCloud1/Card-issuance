@@ -72,9 +72,10 @@ def authorize_order(order_no: str) -> None:
 
 
 def can_reveal_order(order) -> bool:
-    return not order["query_password_hash"] or order["order_no"] in session.get(
-        "authorized_orders", []
-    )
+    """Only the browser session that created the order, or that proved the
+    order's query password, may see delivered cards. Knowing the contact
+    email alone is never enough (it is unverified and easy to guess)."""
+    return order["order_no"] in session.get("authorized_orders", [])
 
 
 def safe_redirect_path(target: str | None, fallback: str) -> str:
@@ -104,7 +105,11 @@ def login_required(view):
             return redirect(url_for("admin_login", next=request.path))
         from .db import fetch_one
 
-        if not fetch_one("SELECT id FROM admin_users WHERE id = ?", (admin_user_id,)):
+        admin = fetch_one(
+            "SELECT session_version FROM admin_users WHERE id = ?", (admin_user_id,)
+        )
+        # 退出或改密码会递增 session_version，复制走的旧 Cookie 随之失效。
+        if not admin or session.get("admin_session_version") != admin["session_version"]:
             session.clear()
             return redirect(url_for("admin_login", next=request.path))
         return view(*args, **kwargs)
