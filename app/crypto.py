@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_UP, Decimal, InvalidOperation
 from functools import lru_cache
@@ -35,10 +35,11 @@ USDT_DECIMALS = 6
 UNIT = 10**USDT_DECIMALS
 MAINNET_USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 DEFAULT_API_BASE = "https://api.trongrid.io"
-# 过期订单的唯一金额在这段时间内不会分给新订单，避免迟到的转账被误配。
-SLOT_COOLDOWN = timedelta(hours=2)
 # 订单过期后仍继续扫描一段时间，用来识别“按时付款但扫描滞后”和“迟到付款”。
 LATE_SCAN_WINDOW = timedelta(hours=6)
+# 过期订单的唯一金额在这段时间内不会分给新订单。必须不短于 LATE_SCAN_WINDOW，
+# 否则旧买家的迟到转账会和复用同一金额的新订单混淆，把卡发给新买家。
+SLOT_COOLDOWN = LATE_SCAN_WINDOW + timedelta(hours=1)
 
 DEFAULT_CONFIG = {
     "address": "",
@@ -257,7 +258,11 @@ def _parse_transfer(item: dict, cfg: CryptoConfig) -> Transfer | None:
 
 
 def _find_order_for_transfer(provider_code: str, transfer: Transfer):
-    """优先匹配按时付款的订单；否则匹配最近一笔已过期的同金额订单（迟到付款）。"""
+    """只在唯一确定时自动匹配：按时付款的订单，或迟到窗口内唯一的过期订单。
+
+    固定地址下只能靠“金额 + 时间”区分订单；只要有两笔订单都可能对应这笔入账，
+    就不自动发卡，留给管理员在“链上入账”页人工核对指派。
+    """
     candidates = fetch_all(
         """SELECT * FROM orders
            WHERE payment_provider = ? AND crypto_address = ? AND crypto_amount = ?
@@ -265,16 +270,17 @@ def _find_order_for_transfer(provider_code: str, transfer: Transfer):
            ORDER BY id DESC LIMIT 20""",
         (provider_code, transfer.to_address, transfer.units, transfer.block_time),
     )
-    for order in candidates:
-        if transfer.block_time < order["expires_at"]:
-            return order
     late_since = (
         datetime.fromisoformat(transfer.block_time) - LATE_SCAN_WINDOW
     ).isoformat()
-    for order in candidates:
-        if order["expires_at"] >= late_since:
-            return order
-    return None
+    on_time = [o for o in candidates if transfer.block_time < o["expires_at"]]
+    late = [
+        o for o in candidates
+        if o["expires_at"] <= transfer.block_time and o["expires_at"] >= late_since
+    ]
+    if len(on_time) + len(late) != 1:
+        return None  # 无匹配或有歧义
+    return (on_time or late)[0]
 
 
 def record_and_apply(provider_code: str, transfer: Transfer) -> str:
@@ -371,21 +377,29 @@ def _acquire_lease(key: str, interval_seconds: float) -> bool:
 
 
 def scan_provider(provider, *, min_interval: float = 0, fetch=None) -> dict:
-    """扫描一个 USDT 通道。没有待匹配订单时不访问网络。"""
+    """扫描一个 USDT 通道。没有待匹配订单时不访问网络。
+
+    按订单里保存的收款地址分别扫描：后台更换收款地址后，新订单用新地址，
+    仍在付款期或迟到窗口内的旧订单继续按旧地址对账。
+    """
     cfg = parse_config(provider["config_json"])
     late_since = (datetime.now(UTC) - LATE_SCAN_WINDOW).replace(microsecond=0).isoformat()
-    oldest = fetch_one(
-        """SELECT MIN(created_at) AS t FROM orders
-           WHERE payment_provider = ? AND crypto_address = ?
-             AND (status = 'pending' OR (status = 'expired' AND expires_at > ?))""",
-        (provider["code"], cfg.address, late_since),
+    open_addresses = fetch_all(
+        """SELECT crypto_address AS address, MIN(created_at) AS t FROM orders
+           WHERE payment_provider = ? AND crypto_address != ''
+             AND (status = 'pending' OR (status = 'expired' AND expires_at > ?))
+           GROUP BY crypto_address""",
+        (provider["code"], late_since),
     )
-    if not oldest or not oldest["t"]:
+    if not open_addresses:
         return {"scanned": False, "reason": "no_open_orders"}
     if min_interval and not _acquire_lease(f"scan:{provider['code']}", min_interval):
         return {"scanned": False, "reason": "throttled"}
-    since = datetime.fromisoformat(oldest["t"]) - timedelta(minutes=1)
-    transfers = (fetch or fetch_transfers)(cfg, since)
+    transfers: list[Transfer] = []
+    for row in open_addresses:
+        since = datetime.fromisoformat(row["t"]) - timedelta(minutes=1)
+        address_cfg = replace(cfg, address=row["address"])
+        transfers.extend((fetch or fetch_transfers)(address_cfg, since))
     results: dict[str, int] = {}
     for transfer in transfers:
         status = record_and_apply(provider["code"], transfer)
@@ -406,6 +420,38 @@ def scan_all(min_interval: float) -> None:
             scan_provider(provider, min_interval=min_interval)
         except Exception:  # 网络或配置问题不能影响其它通道和网页
             current_app.logger.exception("USDT scan failed for %s", provider["code"])
+
+
+_on_demand_lock = threading.Lock()
+
+
+def request_background_scan(app, provider_code: str, *, min_interval: float) -> None:
+    """订单页轮询触发的扫描放到后台线程执行，不阻塞 Web worker。
+
+    每个进程同时最多一个按需扫描线程；数据库租约再限制全局频率。
+    """
+    if not _on_demand_lock.acquire(blocking=False):
+        return
+
+    def run():
+        try:
+            with app.app_context():
+                provider = fetch_one(
+                    "SELECT * FROM payment_providers WHERE code = ? AND is_enabled = 1",
+                    (provider_code,),
+                )
+                if is_crypto_provider(provider):
+                    scan_provider(provider, min_interval=min_interval)
+        except Exception:
+            app.logger.exception("On-demand USDT scan failed")
+        finally:
+            _on_demand_lock.release()
+
+    try:
+        threading.Thread(target=run, name="usdt-on-demand", daemon=True).start()
+    except Exception:
+        _on_demand_lock.release()
+        raise
 
 
 def start_background_watcher(app, interval: float) -> None:

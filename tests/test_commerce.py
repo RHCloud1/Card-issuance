@@ -164,7 +164,8 @@ class CommerceTests(unittest.TestCase):
                 response = self.post_form(stranger, "/order-query", {
                     "contact": "buyer@example.com", "query_password": password,
                 })
-                self.assertIn(order_no, response.get_data(as_text=True))
+                # 密码不对时连订单号都不展示，避免凭邮箱枚举订单。
+                self.assertNotIn(order_no, response.get_data(as_text=True))
                 self.assert_no_cards(response, secrets)
                 self.assert_no_cards(stranger.get(f"/checkout/{order_no}"), secrets)
 
@@ -344,7 +345,7 @@ class CommerceTests(unittest.TestCase):
         with self.app.app_context():
             with self.assertRaises(ValueError):
                 create_order(product_id=product, quantity=2, contact="buyer@example.com",
-                             email="buyer@example.com", query_password="", provider_code="mock")
+                             email="buyer@example.com", query_password="buyer-password", provider_code="mock")
         self.assertEqual(self.rows("SELECT COUNT(*) AS n FROM orders WHERE product_id = ?", (product,))[0]["n"], 0)
         self.assertEqual(self.rows("SELECT status FROM cards WHERE product_id = ?", (product,))[0]["status"], "available")
 
@@ -358,7 +359,7 @@ class CommerceTests(unittest.TestCase):
                 try:
                     return create_order(
                         product_id=product, quantity=1, contact=f"buyer{index}@example.com",
-                        email=f"buyer{index}@example.com", query_password="", provider_code="mock",
+                        email=f"buyer{index}@example.com", query_password="buyer-password", provider_code="mock",
                     )
                 except ValueError:
                     return None
@@ -383,6 +384,166 @@ class CommerceTests(unittest.TestCase):
         self.assertEqual(self.rows("SELECT COUNT(*) AS n FROM cards WHERE status = 'sold'")[0]["n"], 1)
         self.assertEqual(self.rows("SELECT COUNT(*) AS n FROM payment_events")[0]["n"], 1)
 
+    # ------------------------------------------------------------ 安全加固回归
+
+    def test_order_requires_query_password(self):
+        values = {
+            "product_id": str(self.product), "quantity": "1", "contact": "buyer@example.com",
+            "query_password": "", "payment_provider": "mock",
+            "csrf_token": self.token(self.client, f"/buy/{self.product}"),
+        }
+        response = self.client.post("/orders", data=values)
+        self.assertNotIn("/checkout/", response.location)
+        self.assertEqual(self.rows("SELECT COUNT(*) AS n FROM orders")[0]["n"], 0)
+
+    def test_email_alone_never_reveals_legacy_passwordless_order(self):
+        order_no = self.order()
+        self.fulfill(order_no)
+        secrets = self.card_contents(order_no)
+        self.execute("UPDATE orders SET query_password_hash = '' WHERE order_no = ?", (order_no,))
+        stranger = self.app.test_client()
+        for password in ("", "anything-else"):
+            response = self.post_form(stranger, "/order-query", {
+                "contact": "buyer@example.com", "query_password": password,
+            })
+            self.assert_no_cards(response, secrets)
+            self.assertNotIn(order_no, response.get_data(as_text=True))
+        self.assert_no_cards(stranger.get(f"/checkout/{order_no}"), secrets)
+        # 下单的浏览器会话仍可查看
+        self.assertIn(secrets[0], self.client.get(f"/checkout/{order_no}").get_data(as_text=True))
+
+    def test_query_and_checkout_password_failures_lock_out(self):
+        order_no = self.order()
+        self.fulfill(order_no)
+        secrets = self.card_contents(order_no)
+        attacker = self.app.test_client()
+        for index in range(8):
+            target = "/order-query" if index % 2 else f"/checkout/{order_no}"
+            data = {"query_password": f"guess-{index}"}
+            if target == "/order-query":
+                data["contact"] = "buyer@example.com"
+            self.post_form(attacker, target, data)
+        for target in ("/order-query", f"/checkout/{order_no}"):
+            response = self.post_form(attacker, target, {
+                "contact": "buyer@example.com", "query_password": "buyer-password",
+            })
+            self.assert_no_cards(response, secrets)
+
+    def test_order_query_hashes_at_most_a_few_orders(self):
+        self.app.config.update(ORDER_MAX_PENDING_PER_CONTACT=100, ORDER_MAX_PENDING_PER_IP=100,
+                               ORDER_CREATE_LIMIT_PER_HOUR=100)
+        product = self.seed_product(20)
+        for _ in range(12):
+            self.order(product=product)
+        import app.main as main_module
+        calls = []
+        real = main_module.verify_secret
+
+        def counting(value, encoded):
+            calls.append(1)
+            return real(value, encoded)
+
+        with patch.object(main_module, "verify_secret", counting):
+            self.post_form(self.app.test_client(), "/order-query", {
+                "contact": "buyer@example.com", "query_password": "",
+            })
+            self.assertEqual(len(calls), 0)
+            self.post_form(self.app.test_client(), "/order-query", {
+                "contact": "buyer@example.com", "query_password": "wrong-password",
+            })
+            self.assertLessEqual(len(calls), main_module.QUERY_CANDIDATE_LIMIT)
+
+    def test_anonymous_buyers_cannot_reserve_all_stock(self):
+        product = self.seed_product(5)
+        self.order(product=product)
+        self.order(product=product)
+        # 同一邮箱第三单被拒
+        values = {
+            "product_id": str(product), "quantity": "1", "contact": "buyer@example.com",
+            "query_password": "buyer-password", "payment_provider": "mock",
+            "csrf_token": self.token(self.client, f"/buy/{product}"),
+        }
+        self.assertNotIn("/checkout/", self.client.post("/orders", data=values).location)
+        # 换邮箱、同一 IP：第三单可以，第四单被拒
+        for index, allowed in ((1, True), (2, False)):
+            values.update(contact=f"other{index}@example.com",
+                          csrf_token=self.token(self.client, f"/buy/{product}"))
+            location = self.client.post("/orders", data=values).location
+            self.assertEqual("/checkout/" in location, allowed)
+        self.assertEqual(self.rows(
+            "SELECT COUNT(*) AS n FROM cards WHERE product_id = ? AND status = 'available'",
+            (product,),
+        )[0]["n"], 2)
+
+    def admin_login(self, client):
+        return self.post_form(client, "/test-admin/login", {
+            "username": "operator@example.com", "password": "test-operator-password",
+        }, token_page="/test-admin/login")
+
+    def test_admin_logout_revokes_copied_session_cookie(self):
+        admin = self.app.test_client()
+        self.admin_login(admin)
+        with admin.session_transaction() as sess:
+            stolen = dict(sess)
+        thief = self.app.test_client()
+        with thief.session_transaction() as sess:
+            sess.update(stolen)
+        self.assertEqual(thief.get("/test-admin").status_code, 200)
+        self.post_form(admin, "/test-admin/logout", token_page="/test-admin")
+        self.assertEqual(thief.get("/test-admin").status_code, 302)
+
+    def test_admin_password_change_revokes_sessions(self):
+        admin = self.app.test_client()
+        self.admin_login(admin)
+        self.assertEqual(admin.get("/test-admin").status_code, 200)
+        # 重启但密码未变：会话保持
+        create_app()
+        self.assertEqual(admin.get("/test-admin").status_code, 200)
+        # 换了密码：旧会话失效
+        with patch.dict(os.environ, {"ADMIN_PASSWORD": "rotated-operator-password"}):
+            create_app()
+        self.assertEqual(admin.get("/test-admin").status_code, 302)
+
+    def test_security_headers_and_secure_cookie(self):
+        response = self.client.get("/")
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        self.assertNotIn("Strict-Transport-Security", response.headers)
+        self.assertFalse(self.app.config["SESSION_COOKIE_SECURE"])
+        with patch.dict(os.environ, {"APP_BASE_URL": "https://shop.example.com",
+                                     "APP_SECRET": "x" * 48, "TRUSTED_PROXY_COUNT": "1"}):
+            secure_app = create_app()
+        self.assertTrue(secure_app.config["SESSION_COOKIE_SECURE"])
+        response = secure_app.test_client().get("/", headers={"X-Forwarded-Proto": "https"})
+        self.assertIn("max-age=", response.headers["Strict-Transport-Security"])
+
+    def test_example_or_weak_secret_is_rejected(self):
+        with patch.dict(os.environ, {"APP_SECRET": "change-this-to-a-long-random-string"}):
+            with self.assertRaises(RuntimeError):
+                create_app()
+        with patch.dict(os.environ, {"APP_BASE_URL": "https://shop.example.com",
+                                     "APP_SECRET": "dev-secret"}):
+            with self.assertRaises(RuntimeError):
+                create_app()
+
+    def test_price_sort_groups_currencies(self):
+        self.execute("UPDATE products SET status = 'inactive'")
+        with self.app.app_context():
+            db = get_db()
+            category = db.execute("SELECT id FROM categories LIMIT 1").fetchone()[0]
+            now = utcnow()
+            for name, cents, currency in (("Yuan nine", 900, "CNY"), ("Dollar two", 200, "USD"),
+                                          ("Yuan one", 100, "CNY")):
+                db.execute(
+                    """INSERT INTO products (category_id, name, price_cents, currency, status,
+                           buy_limit, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 'active', 1, ?, ?)""",
+                    (category, name, cents, currency, now, now),
+                )
+        body = self.client.get("/?sort=price_asc").get_data(as_text=True)
+        positions = [body.index(name) for name in ("Yuan one", "Yuan nine", "Dollar two")]
+        self.assertEqual(positions, sorted(positions))
 
 if __name__ == "__main__":
     unittest.main()

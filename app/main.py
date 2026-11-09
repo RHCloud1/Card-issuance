@@ -57,9 +57,18 @@ def create_app() -> Flask:
         TRUSTED_PROXY_COUNT=int(os.getenv("TRUSTED_PROXY_COUNT", "0")),
         # 后台自动扫描 USDT 入账的间隔秒数；0 表示关闭（仅订单页轮询和后台手动扫描）。
         CRYPTO_WATCH_INTERVAL=float(os.getenv("CRYPTO_WATCH_INTERVAL", "0") or 0),
+        # 防止匿名访客用未付款订单占光库存：同一邮箱 / 同一 IP 同时待付款的订单数，
+        # 以及同一 IP 每小时最多下单次数。
+        ORDER_MAX_PENDING_PER_CONTACT=int(os.getenv("ORDER_MAX_PENDING_PER_CONTACT", "2")),
+        ORDER_MAX_PENDING_PER_IP=int(os.getenv("ORDER_MAX_PENDING_PER_IP", "3")),
+        ORDER_CREATE_LIMIT_PER_HOUR=int(os.getenv("ORDER_CREATE_LIMIT_PER_HOUR", "10")),
+        # 查单 / 取卡密码：同一 IP 或同一邮箱在 15 分钟内失败这么多次后暂时锁定。
+        QUERY_MAX_FAILURES=int(os.getenv("QUERY_MAX_FAILURES", "8")),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
     )
+    app.config["SESSION_COOKIE_SECURE"] = app.config["APP_BASE_URL"].startswith("https://")
+    check_app_secret(os.getenv("APP_SECRET"), app.config["APP_BASE_URL"])
     admin_path = app.config["ADMIN_PATH"]
     if app.config["TRUSTED_PROXY_COUNT"] > 0:
         from werkzeug.middleware.proxy_fix import ProxyFix
@@ -95,8 +104,17 @@ def create_app() -> Flask:
 
     @app.after_request
     def protect_order_responses(response):
-        if request.endpoint in {"checkout", "order_query", "checkout_status"}:
+        if request.endpoint in {"checkout", "order_query", "checkout_status"} or (
+            request.endpoint or ""
+        ).startswith("admin_"):
             response.headers["Cache-Control"] = "no-store"
+        headers = response.headers
+        headers.setdefault("X-Frame-Options", "DENY")
+        headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        headers.setdefault("X-Content-Type-Options", "nosniff")
+        headers.setdefault("Referrer-Policy", "same-origin")
+        if request.is_secure:
+            headers.setdefault("Strict-Transport-Security", "max-age=31536000")
         return response
 
     @app.route("/")
@@ -114,8 +132,9 @@ def create_app() -> Flask:
 
         order_by = {
             "category": "c.sort_order ASC, c.id ASC, p.sort_order ASC, p.id DESC",
-            "price_asc": "p.price_cents ASC, p.sort_order ASC, p.id DESC",
-            "price_desc": "p.price_cents DESC, p.sort_order ASC, p.id DESC",
+            # 不同币种的标价不能直接比较，先按币种分组再按价格排序。
+            "price_asc": "p.currency ASC, p.price_cents ASC, p.sort_order ASC, p.id DESC",
+            "price_desc": "p.currency ASC, p.price_cents DESC, p.sort_order ASC, p.id DESC",
             "newest": "p.id DESC",
         }[sort]
 
@@ -203,6 +222,7 @@ def create_app() -> Flask:
                 email=contact,
                 query_password=query_password,
                 provider_code=provider_code,
+                client_ip=client_ip(),
             )
         except ValueError as exc:
             flash(str(exc), "error")
@@ -216,12 +236,15 @@ def create_app() -> Flask:
         order = get_order_or_404(order_no)
         if request.method == "POST":
             query_password = request.form.get("query_password", "").strip()
-            if can_reveal_order(order) or verify_secret(
-                query_password, order["query_password_hash"]
-            ):
+            if can_reveal_order(order):
+                return redirect(url_for("checkout", order_no=order["order_no"]))
+            if query_locked(order["contact"]):
+                flash("取卡密码错误次数过多，请 15 分钟后再试。", "error")
+            elif check_order_password(order, query_password):
                 authorize_order(order["order_no"])
                 return redirect(url_for("checkout", order_no=order["order_no"]))
-            flash("取卡密码错误，请重新输入。", "error")
+            else:
+                flash("取卡密码错误，请重新输入。", "error")
         provider = fetch_one(
             "SELECT * FROM payment_providers WHERE code = ?",
             (order["payment_provider"],),
@@ -277,19 +300,11 @@ def create_app() -> Flask:
 
     @app.get("/checkout/<order_no>/status")
     def checkout_status(order_no: str):
-        """订单页轮询用：待支付的 USDT 订单会顺带触发一次节流的链上扫描。"""
+        """订单页轮询用：只读数据库。待支付的 USDT 订单会在后台线程里
+        请求一次节流的链上扫描，不占用当前 Web worker。"""
         order = get_order_or_404(order_no)
         if order["status"] == "pending" and order["crypto_amount"]:
-            provider = fetch_one(
-                "SELECT * FROM payment_providers WHERE code = ? AND is_enabled = 1",
-                (order["payment_provider"],),
-            )
-            if crypto.is_crypto_provider(provider):
-                try:
-                    crypto.scan_provider(provider, min_interval=10)
-                except Exception:
-                    app.logger.exception("On-demand USDT scan failed")
-                order = get_order_or_404(order_no)
+            crypto.request_background_scan(app, order["payment_provider"], min_interval=10)
         return jsonify({"status": order["status"]})
 
     @app.post("/payments/<provider_code>/notify")
@@ -306,27 +321,36 @@ def create_app() -> Flask:
             query_password = request.form.get("query_password", "").strip()
             if not is_valid_email(contact):
                 flash("请填写有效联系邮箱。", "error")
-                return render_template("order_query.html", found_orders=found_orders)
-
-            if order_no:
-                found_orders = fetch_all(
-                    "SELECT * FROM orders WHERE order_no = ? AND contact = ? ORDER BY id DESC",
-                    (order_no, contact),
-                )
+            elif not query_password:
+                flash("请填写下单时设置的取卡密码。", "error")
+            elif query_locked(contact):
+                flash("查询失败次数过多，请 15 分钟后再试。", "error")
             else:
-                found_orders = fetch_all(
-                    "SELECT * FROM orders WHERE contact = ? ORDER BY id DESC LIMIT 50",
-                    (contact,),
-                )
-
-            if not found_orders:
-                flash("没有找到匹配的订单。", "error")
-            for order in found_orders:
-                if order["query_password_hash"] and verify_secret(
-                    query_password, order["query_password_hash"]
-                ):
-                    authorize_order(order["order_no"])
-                reveal_cards[order["id"]] = can_reveal_order(order)
+                # 只校验少量候选订单，避免一次查询触发大量密码哈希计算。
+                if order_no:
+                    candidates = fetch_all(
+                        """SELECT * FROM orders
+                           WHERE order_no = ? AND contact = ? AND query_password_hash != ''""",
+                        (order_no, contact),
+                    )
+                else:
+                    candidates = fetch_all(
+                        """SELECT * FROM orders
+                           WHERE contact = ? AND query_password_hash != ''
+                           ORDER BY id DESC LIMIT ?""",
+                        (contact, QUERY_CANDIDATE_LIMIT),
+                    )
+                found_orders = [
+                    order for order in candidates
+                    if verify_secret(query_password, order["query_password_hash"])
+                ]
+                if found_orders:
+                    for order in found_orders:
+                        authorize_order(order["order_no"])
+                        reveal_cards[order["id"]] = True
+                else:
+                    record_query_failure(contact)
+                    flash("没有找到匹配的订单，请核对邮箱、订单号和取卡密码。", "error")
         return render_template(
             "order_query.html",
             found_orders=found_orders,
@@ -382,6 +406,7 @@ def create_app() -> Flask:
                 session.clear()
                 session["admin_user_id"] = admin["id"]
                 session["admin_username"] = admin["username"]
+                session["admin_session_version"] = admin["session_version"]
                 csrf_token()
                 flash("已登录后台。", "success")
                 return redirect(
@@ -393,6 +418,11 @@ def create_app() -> Flask:
     @app.post(f"{admin_path}/logout")
     @login_required
     def admin_logout():
+        # 递增版本号：本次和其他设备上复制的旧会话 Cookie 都会失效。
+        get_db().execute(
+            "UPDATE admin_users SET session_version = session_version + 1 WHERE id = ?",
+            (session.get("admin_user_id"),),
+        )
         session.clear()
         flash("已退出。", "success")
         return redirect(url_for("admin_login"))
@@ -734,6 +764,47 @@ def create_app() -> Flask:
         if not reference:
             flash("请填写收款凭证（链上交易号或备注）。", "error")
             return redirect(url_for("admin_orders"))
+        if TX_HASH_RE.fullmatch(reference):
+            reference = reference.lower()
+        # 同一笔收款只能用于一个订单：自动入账、链上指派和人工补单共用同一套去重。
+        used = fetch_one(
+            """SELECT order_no FROM payment_events
+               WHERE trade_no IN (?, ?) AND order_no != ?
+               UNION ALL
+               SELECT order_no FROM crypto_transfers
+               WHERE tx_id = ? AND status = 'matched' AND order_no IS NOT NULL AND order_no != ?
+               LIMIT 1""",
+            (reference, f"MANUAL:{reference}", order["order_no"], reference, order["order_no"]),
+        )
+        if used:
+            flash(f"该收款凭证已用于订单 {used['order_no']}，不能重复补单。", "error")
+            return redirect(url_for("admin_orders"))
+        provider = fetch_one(
+            "SELECT * FROM payment_providers WHERE code = ?", (order["payment_provider"],)
+        )
+        if crypto.is_crypto_provider(provider):
+            transfer = fetch_one(
+                "SELECT tx_id FROM crypto_transfers WHERE provider_code = ? AND tx_id = ?",
+                (order["payment_provider"], reference),
+            )
+            if transfer:
+                # 已登记的链上入账：直接认领这笔入账并发卡，与“链上入账 → 指派”同一路径。
+                try:
+                    status = crypto.assign_transfer(
+                        order["payment_provider"], transfer["tx_id"], order["order_no"],
+                        admin_override=True,
+                    )
+                except ValueError as exc:
+                    flash(str(exc), "error")
+                else:
+                    if status == "matched":
+                        flash(f"订单 {order_no} 已认领链上入账并发卡。", "success")
+                    else:
+                        flash(f"订单 {order_no} 已认领入账，但未能发卡，请查看订单。", "error")
+                return redirect(url_for("admin_orders"))
+            if TX_HASH_RE.fullmatch(reference):
+                flash("链上入账中没有这笔交易。请先在“链上入账”页扫描，确认到账后再补单。", "error")
+                return redirect(url_for("admin_orders"))
         try:
             result = fulfill_order(
                 order_no=order["order_no"],
@@ -788,12 +859,23 @@ def bootstrap() -> None:
 def ensure_default_admin() -> None:
     username = os.getenv("ADMIN_USERNAME", "admin@example.com")
     password = os.getenv("ADMIN_PASSWORD", "change-me-now")
-    get_db().execute(
-        """INSERT INTO admin_users (username, password_hash, created_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash""",
-        (username, hash_secret(password), utcnow()),
-    )
+    db = get_db()
+    existing = db.execute(
+        "SELECT id, password_hash FROM admin_users WHERE username = ?", (username,)
+    ).fetchone()
+    if not existing:
+        db.execute(
+            "INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, ?)",
+            (username, hash_secret(password), utcnow()),
+        )
+    elif not verify_secret(password, existing["password_hash"]):
+        # 密码已更换：更新哈希并让所有旧会话失效。
+        db.execute(
+            """UPDATE admin_users
+               SET password_hash = ?, session_version = session_version + 1
+               WHERE id = ?""",
+            (hash_secret(password), existing["id"]),
+        )
     if username != "admin":
         get_db().execute("DELETE FROM admin_users WHERE username = 'admin'")
 
@@ -906,6 +988,71 @@ def clear_login_failures(ip: str) -> None:
     get_db().execute("DELETE FROM login_failures WHERE ip = ?", (ip,))
 
 
+# 一次无订单号的查单最多校验这么多笔订单的密码，限制单次请求的 CPU 开销。
+QUERY_CANDIDATE_LIMIT = 5
+QUERY_LOCK_WINDOW = timedelta(minutes=15)
+TX_HASH_RE = re.compile(r"[0-9a-fA-F]{64}")
+PLACEHOLDER_SECRETS = {"change-this-to-a-long-random-string", "change-me", "secret", "dev-secret"}
+
+
+def check_app_secret(secret: str | None, base_url: str) -> None:
+    """拒绝用公开的示例密钥启动：知道密钥的人可以伪造后台会话。"""
+    if secret and secret.strip() == "change-this-to-a-long-random-string":
+        raise RuntimeError("APP_SECRET 仍是 .env.example 的示例值，请改为随机长字符串。")
+    if base_url.startswith("https://") and (
+        not secret or len(secret) < 32 or secret.strip() in PLACEHOLDER_SECRETS
+    ):
+        raise RuntimeError("生产环境的 APP_SECRET 必须是至少 32 位的随机字符串。")
+
+
+def client_ip() -> str:
+    return request.remote_addr or "unknown"
+
+
+def _since(window: timedelta) -> str:
+    return (datetime.now(UTC) - window).replace(microsecond=0).isoformat()
+
+
+def rate_count(bucket: str, key: str, window: timedelta) -> int:
+    return fetch_one(
+        "SELECT COUNT(*) AS n FROM rate_events WHERE bucket = ? AND key = ? AND created_at > ?",
+        (bucket, key, _since(window)),
+    )["n"]
+
+
+def record_rate_event(bucket: str, key: str) -> None:
+    db = get_db()
+    db.execute(
+        "INSERT INTO rate_events (bucket, key, created_at) VALUES (?, ?, ?)",
+        (bucket, key, utcnow()),
+    )
+    db.execute("DELETE FROM rate_events WHERE created_at < ?", (_since(timedelta(days=1)),))
+
+
+def query_locked(contact: str) -> bool:
+    """查单 / 取卡密码按 IP 和邮箱分别计失败次数，任一超限即暂时锁定。"""
+    limit = current_app.config["QUERY_MAX_FAILURES"]
+    return (
+        rate_count("query_ip", client_ip(), QUERY_LOCK_WINDOW) >= limit
+        or rate_count("query_contact", contact, QUERY_LOCK_WINDOW) >= limit
+    )
+
+
+def record_query_failure(contact: str) -> None:
+    record_rate_event("query_ip", client_ip())
+    record_rate_event("query_contact", contact)
+
+
+def check_order_password(order, password: str) -> bool:
+    """校验单个订单的取卡密码；空密码不做哈希计算，失败计入限流。"""
+    ok = bool(password and order["query_password_hash"]) and verify_secret(
+        password, order["query_password_hash"]
+    )
+    if not ok and password:
+        record_query_failure(order["contact"])
+    return ok
+
+
 def available_stock(product_id: int) -> int:
     row = fetch_one(
         "SELECT COUNT(*) AS n FROM cards WHERE product_id = ? AND status = 'available'",
@@ -956,6 +1103,29 @@ def category_options():
     return fetch_all("SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order ASC, id ASC")
 
 
+def enforce_order_limits(db, contact: str, ip: str) -> None:
+    """未付款订单会预占库存：限制每个买家同时待付款的订单数和下单频率。"""
+    config = current_app.config
+    pending_by_contact = db.execute(
+        "SELECT COUNT(*) FROM orders WHERE contact = ? AND status = 'pending'", (contact,)
+    ).fetchone()[0]
+    if pending_by_contact >= config["ORDER_MAX_PENDING_PER_CONTACT"]:
+        raise ValueError("该邮箱已有未支付的订单，请先完成支付或等待订单过期后再下单。")
+    if not ip:
+        return
+    pending_by_ip = db.execute(
+        "SELECT COUNT(*) FROM orders WHERE client_ip = ? AND status = 'pending'", (ip,)
+    ).fetchone()[0]
+    if pending_by_ip >= config["ORDER_MAX_PENDING_PER_IP"]:
+        raise ValueError("当前网络下未支付的订单过多，请先完成支付或等待订单过期后再下单。")
+    recent = db.execute(
+        "SELECT COUNT(*) FROM orders WHERE client_ip = ? AND created_at > ?",
+        (ip, _since(timedelta(hours=1))),
+    ).fetchone()[0]
+    if recent >= config["ORDER_CREATE_LIMIT_PER_HOUR"]:
+        raise ValueError("下单过于频繁，请稍后再试。")
+
+
 def create_order(
     *,
     product_id: int,
@@ -964,13 +1134,15 @@ def create_order(
     email: str,
     query_password: str,
     provider_code: str,
+    client_ip: str = "",
 ) -> str:
     if quantity < 1:
         raise ValueError("购买数量必须大于 0。")
     if not is_valid_email(contact):
         raise ValueError("请填写有效联系邮箱。")
-    if query_password and not (6 <= len(query_password) <= 20):
-        raise ValueError("取卡密码长度应为 6-20 位。")
+    # 取卡密码是查看卡密的唯一凭证，必须设置（邮箱未经验证，不能单独作为取卡依据）。
+    if not (6 <= len(query_password or "") <= 20):
+        raise ValueError("请设置 6-20 位取卡密码。")
     if provider_code == "mock" and not current_app.config["ENABLE_MOCK_PAYMENTS"]:
         raise ValueError("模拟支付未启用。")
 
@@ -1004,6 +1176,8 @@ def create_order(
             raise ValueError("商品不存在或已下架。")
         if quantity > product["buy_limit"]:
             raise ValueError(f"该商品单次最多购买 {product['buy_limit']} 件。")
+        # 在写锁内检查，防止并发下单绕过限制。
+        enforce_order_limits(db, contact, client_ip)
 
         cards = db.execute(
             """
@@ -1039,8 +1213,8 @@ def create_order(
             INSERT INTO orders
                 (order_no, product_id, product_name, quantity, contact, email,
                  query_password_hash, amount_cents, currency, status, payment_provider,
-                 crypto_amount, crypto_address, expires_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                 crypto_amount, crypto_address, client_ip, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
             """,
             (
                 order_no,
@@ -1055,6 +1229,7 @@ def create_order(
                 provider_code,
                 crypto_amount,
                 crypto_address,
+                client_ip,
                 expires_at,
                 now,
             ),

@@ -66,6 +66,8 @@ COLUMN_MIGRATIONS = [
     ("orders", "crypto_address", "TEXT NOT NULL DEFAULT ''"),
     ("products", "currency", "TEXT NOT NULL DEFAULT 'CNY'"),
     ("orders", "currency", "TEXT NOT NULL DEFAULT 'CNY'"),
+    ("orders", "client_ip", "TEXT NOT NULL DEFAULT ''"),
+    ("admin_users", "session_version", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 
@@ -76,6 +78,9 @@ def migrate_db(db: sqlite3.Connection) -> None:
             existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_client_ip ON orders(client_ip, status)"
+        )
         db.execute(
             """CREATE INDEX IF NOT EXISTS idx_orders_crypto_amount
                ON orders(payment_provider, crypto_address, crypto_amount, status)"""

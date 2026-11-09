@@ -26,6 +26,14 @@ get_env() {
   grep -E "^${key}=" .env | tail -n 1 | cut -d= -f2- || true
 }
 
+# 旧版内置 Caddy 部署的 .env 可能没有 TRUSTED_PROXY_COUNT，应用会把所有访客
+# 识别成 Caddy 的同一个 IP（登录限流、下单限流会把所有人锁在一起）。
+if ! grep -qE '^TRUSTED_PROXY_COUNT=' .env \
+  && grep -qE '^[[:space:]]*caddy:' docker-compose.override.yml; then
+  printf '\n# 由 update.sh 自动补充：内置 Caddy 反向代理\nTRUSTED_PROXY_COUNT=1\n' >> .env
+  echo "已为内置 Caddy 部署补充 TRUSTED_PROXY_COUNT=1。"
+fi
+
 timestamp="$(date +%Y%m%d-%H%M%S)"
 mkdir -p backups
 snapshot_dir="$(mktemp -d backups/.snapshot-XXXXXXXX)"

@@ -13,11 +13,12 @@
         </label>
         <label>
             订单号（选填）
-            <input type="text" name="order_no" placeholder="留空则查询该邮箱下全部订单">
+            <input type="text" name="order_no" placeholder="留空则查询该邮箱最近的订单">
         </label>
         <label>
-            取卡密码（选填）
-            <input type="password" name="query_password" autocomplete="current-password" maxlength="20" placeholder="如果下单时设置过，填写后可查看卡密">
+            取卡密码
+            <input type="password" name="query_password" autocomplete="current-password" maxlength="20" placeholder="下单时设置的取卡密码" required>
+            <small>早期未设置取卡密码的订单无法在此查询，请提交售后工单联系客服。</small>
         </label>
         <button class="button" type="submit">查询</button>
     </form>
@@ -37,8 +38,7 @@
                         {% if reveal_cards.get(order.id) %}
                             <pre class="card-output">{{ order.delivered_content }}</pre>
                         {% else %}
-                            <div class="notice">该订单设置过取卡密码，填写正确密码后可查看卡密。</div>
-                            <a class="button secondary" href="{{ url_for('checkout', order_no=order.order_no) }}">验证取卡密码</a>
+                            <div class="notice">请填写正确的取卡密码后查看卡密。</div>
                         {% endif %}
                     {% else %}
                         <a class="button secondary" href="{{ url_for('checkout', order_no=order.order_no) }}">查看订单</a>

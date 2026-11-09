@@ -10,6 +10,8 @@ import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -104,6 +106,7 @@ class CryptoTestBase(unittest.TestCase):
             "product_id": str(self.product),
             "quantity": str(quantity),
             "contact": "buyer@example.com",
+            "query_password": "buyer-password",
             "payment_provider": "usdt_trc20",
             "csrf_token": self.token(client, f"/buy/{self.product}"),
         })
@@ -256,13 +259,109 @@ class CryptoPaymentTests(CryptoTestBase):
             self.order_row(first)["crypto_amount"], self.order_row(second)["crypto_amount"]
         )
 
-    def test_status_endpoint_triggers_scan(self):
+    def test_status_endpoint_scans_in_background_without_blocking(self):
         order_no = self.place_order()
         units = self.order_row(order_no)["crypto_amount"]
-        with patch.object(crypto, "fetch_transfers", return_value=[self.transfer(units)]):
+        release = threading.Event()
+
+        def slow_fetch(cfg, since):
+            release.wait(timeout=10)  # 模拟 TronGrid 慢响应
+            return [self.transfer(units)]
+
+        with patch.object(crypto, "fetch_transfers", side_effect=slow_fetch):
             response = self.client.get(f"/checkout/{order_no}/status")
-        self.assertEqual(response.get_json(), {"status": "fulfilled"})
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
+            # 请求立即返回，不等链上查询
+            self.assertEqual(response.get_json(), {"status": "pending"})
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            release.set()
+            for _ in range(200):
+                if not crypto._on_demand_lock.locked():
+                    break
+                time.sleep(0.02)
+        self.assertEqual(self.client.get(f"/checkout/{order_no}/status").get_json(),
+                         {"status": "fulfilled"})
+
+    def test_late_payment_is_not_given_to_new_order_reusing_amount(self):
+        old = self.place_order()
+        units = self.order_row(old)["crypto_amount"]
+        # 旧订单过期 3 小时（超过旧版 2 小时冷却）
+        self.backdate(old, created_ago=timedelta(hours=3, minutes=15), expires_ago=timedelta(hours=3))
+        with self.app.app_context():
+            expire_stale_orders()
+        new = self.place_order()
+        self.assertNotEqual(self.order_row(new)["crypto_amount"], units)
+
+    def test_ambiguous_transfer_is_left_for_manual_review(self):
+        old = self.place_order()
+        units = self.order_row(old)["crypto_amount"]
+        self.backdate(old, created_ago=timedelta(hours=3, minutes=15), expires_ago=timedelta(hours=3))
+        with self.app.app_context():
+            expire_stale_orders()
+        new = self.place_order()
+        # 人为制造金额冲突（例如旧版本遗留数据）
+        self.execute("UPDATE orders SET crypto_amount = ? WHERE order_no = ?", (units, new))
+        self.scan(self.transfer(units))
+        self.assertEqual(self.order_row(new)["status"], "pending")
+        self.assertEqual(self.order_row(old)["status"], "expired")
+        self.assertEqual(self.rows("SELECT status FROM crypto_transfers")[0]["status"], "unmatched")
+
+    def test_manual_confirm_cannot_reuse_auto_matched_transfer(self):
+        first = self.place_order()
+        second = self.place_order()
+        tx = "a" * 64
+        self.scan(self.transfer(self.order_row(first)["crypto_amount"], tx=tx))
+        self.assertEqual(self.order_row(first)["status"], "fulfilled")
+        admin = self.admin_client()
+        for reference in (tx, tx.upper()):
+            admin.post(f"/test-admin/orders/{second}/confirm-paid", data={
+                "reference": reference,
+                "csrf_token": self.token(admin, "/test-admin/orders"),
+            })
+        # 未登记的 64 位交易号同样拒绝（需先扫描入账）
+        admin.post(f"/test-admin/orders/{second}/confirm-paid", data={
+            "reference": "c" * 64,
+            "csrf_token": self.token(admin, "/test-admin/orders"),
+        })
+        self.assertEqual(self.order_row(second)["status"], "pending")
+        self.assertEqual(len(self.rows("SELECT * FROM cards WHERE status = 'sold'")), 1)
+
+    def test_manual_confirm_claims_registered_transfer(self):
+        order_no = self.place_order()
+        tx = "d" * 64
+        self.scan(self.transfer(1_000_000, tx=tx))  # 金额不符，未自动匹配
+        admin = self.admin_client()
+        admin.post(f"/test-admin/orders/{order_no}/confirm-paid", data={
+            "reference": tx, "csrf_token": self.token(admin, "/test-admin/orders"),
+        })
+        self.assertEqual(self.order_row(order_no)["status"], "fulfilled")
+        transfer = self.rows("SELECT * FROM crypto_transfers")[0]
+        self.assertEqual((transfer["status"], transfer["order_no"]), ("matched", order_no))
+        self.assertEqual(self.rows("SELECT trade_no FROM payment_events")[0]["trade_no"], tx)
+
+    def test_scanner_keeps_watching_address_of_open_orders_after_change(self):
+        old_order = self.place_order()
+        new_address = tron_address(b"new-shop")
+        config = dict(crypto.DEFAULT_CONFIG, address=new_address, cny_per_usdt="7.20")
+        self.execute(
+            "UPDATE payment_providers SET config_json = ? WHERE code = 'usdt_trc20'",
+            (json.dumps(config),),
+        )
+        units = self.order_row(old_order)["crypto_amount"]
+        seen = []
+
+        def fetch(cfg, since):
+            seen.append(cfg.address)
+            if cfg.address == SHOP_ADDRESS:
+                return [self.transfer(units)]
+            return []
+
+        with self.app.app_context():
+            provider = get_db().execute(
+                "SELECT * FROM payment_providers WHERE code = 'usdt_trc20'"
+            ).fetchone()
+            crypto.scan_provider(provider, fetch=fetch)
+        self.assertIn(SHOP_ADDRESS, seen)
+        self.assertEqual(self.order_row(old_order)["status"], "fulfilled")
 
     def test_no_network_call_without_open_orders(self):
         with patch.object(crypto, "fetch_transfers", side_effect=AssertionError("network")):
