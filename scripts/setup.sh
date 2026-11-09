@@ -166,11 +166,11 @@ prompt_secret() {
     echo >&2
     read -r -s -p "确认$label: " second
     echo >&2
-    if [ -n "$first" ] && [ "$first" = "$second" ]; then
+    if [ "${#first}" -ge 12 ] && [ "$first" = "$second" ]; then
       printf '%s' "$first"
       return
     fi
-    echo "两次密码不一致或密码为空，请重试。" >&2
+    echo "两次密码不一致，或密码短于 12 位，请重试。" >&2
   done
 }
 

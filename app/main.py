@@ -62,6 +62,12 @@ def create_app() -> Flask:
         ORDER_MAX_PENDING_PER_CONTACT=int(os.getenv("ORDER_MAX_PENDING_PER_CONTACT", "2")),
         ORDER_MAX_PENDING_PER_IP=int(os.getenv("ORDER_MAX_PENDING_PER_IP", "3")),
         ORDER_CREATE_LIMIT_PER_HOUR=int(os.getenv("ORDER_CREATE_LIMIT_PER_HOUR", "10")),
+        # 同一 IP 的待支付订单合计最多预占多少张卡密（防止大数量订单囤货）。
+        ORDER_MAX_PENDING_CARDS_PER_IP=int(os.getenv("ORDER_MAX_PENDING_CARDS_PER_IP", "10")),
+        # 同一 IP 每小时最多提交多少张售后工单。
+        TICKET_LIMIT_PER_HOUR=int(os.getenv("TICKET_LIMIT_PER_HOUR", "5")),
+        # 请求体上限，防止超大表单占满内存（卡密导入也在此范围内）。
+        MAX_CONTENT_LENGTH=5 * 1024 * 1024,
         # 查单 / 取卡密码：同一 IP 或同一邮箱在 15 分钟内失败这么多次后暂时锁定。
         QUERY_MAX_FAILURES=int(os.getenv("QUERY_MAX_FAILURES", "8")),
         SESSION_COOKIE_HTTPONLY=True,
@@ -69,6 +75,7 @@ def create_app() -> Flask:
     )
     app.config["SESSION_COOKIE_SECURE"] = app.config["APP_BASE_URL"].startswith("https://")
     check_app_secret(os.getenv("APP_SECRET"), app.config["APP_BASE_URL"])
+    check_admin_credentials(app.config["APP_BASE_URL"])
     admin_path = app.config["ADMIN_PATH"]
     if app.config["TRUSTED_PROXY_COUNT"] > 0:
         from werkzeug.middleware.proxy_fix import ProxyFix
@@ -370,7 +377,14 @@ def create_app() -> Flask:
                 flash("请填写工单标题。", "error")
             elif len(message) < 5:
                 flash("请填写更完整的问题描述。", "error")
+            elif len(subject) > 200 or len(message) > 5000:
+                flash("标题或描述过长（描述最多 5000 字）。", "error")
+            elif rate_count("ticket_ip", client_ip(), timedelta(hours=1)) >= app.config[
+                "TICKET_LIMIT_PER_HOUR"
+            ]:
+                flash("提交过于频繁，请稍后再试。", "error")
             else:
+                record_rate_event("ticket_ip", client_ip())
                 ticket_no = "T" + secrets.token_hex(6).upper()
                 now = utcnow()
                 get_db().execute(
@@ -663,6 +677,25 @@ def create_app() -> Flask:
                 except crypto.CryptoConfigError as exc:
                     flash(f"无法启用：{exc}", "error")
                     return render_template("admin/payment_form.html", provider=form_values)
+            if crypto.is_crypto_provider(provider):
+                # 订单只记录了收款地址：还有未结清订单时更换代币合约或接口（如切到测试网），
+                # 会让旧订单按新网络判定付款。换地址不受限制（旧地址会继续对账）。
+                try:
+                    old_config = json.loads(provider["config_json"] or "{}")
+                except json.JSONDecodeError:
+                    old_config = {}
+                changed = [
+                    key for key in ("token_contract", "api_base")
+                    if str(parsed_config.get(key) or crypto.DEFAULT_CONFIG[key]).strip()
+                    != str(old_config.get(key) or crypto.DEFAULT_CONFIG[key]).strip()
+                ]
+                if changed and crypto.has_open_orders(code):
+                    flash(
+                        f"还有未结清的 USDT 订单（待支付或 {int(crypto.LATE_SCAN_WINDOW.total_seconds() // 3600)} "
+                        f"小时内过期），暂不能修改 {', '.join(changed)}。请等这些订单结清后再改。",
+                        "error",
+                    )
+                    return render_template("admin/payment_form.html", provider=form_values)
             pretty_config = json.dumps(parsed_config, ensure_ascii=False, indent=2)
             get_db().execute(
                 """
@@ -764,17 +797,22 @@ def create_app() -> Flask:
         if not reference:
             flash("请填写收款凭证（链上交易号或备注）。", "error")
             return redirect(url_for("admin_orders"))
-        if TX_HASH_RE.fullmatch(reference):
-            reference = reference.lower()
+        # 交易号或浏览器链接（如 tronscan）统一提取成交易哈希，避免同一笔钱换个写法重复补单。
+        tx_hash = crypto.extract_tx_hash(reference)
+        key = tx_hash or reference
+        like = f"{tx_hash}#%" if tx_hash else None
         # 同一笔收款只能用于一个订单：自动入账、链上指派和人工补单共用同一套去重。
         used = fetch_one(
             """SELECT order_no FROM payment_events
-               WHERE trade_no IN (?, ?) AND order_no != ?
+               WHERE (trade_no IN (?, ?) OR (? IS NOT NULL AND trade_no LIKE ?))
+                 AND order_no != ?
                UNION ALL
                SELECT order_no FROM crypto_transfers
-               WHERE tx_id = ? AND status = 'matched' AND order_no IS NOT NULL AND order_no != ?
+               WHERE (tx_id = ? OR (? IS NOT NULL AND tx_id LIKE ?))
+                 AND status IN ('matched', 'late') AND order_no IS NOT NULL AND order_no != ?
                LIMIT 1""",
-            (reference, f"MANUAL:{reference}", order["order_no"], reference, order["order_no"]),
+            (key, f"MANUAL:{key}", like, like, order["order_no"],
+             key, like, like, order["order_no"]),
         )
         if used:
             flash(f"该收款凭证已用于订单 {used['order_no']}，不能重复补单。", "error")
@@ -783,15 +821,19 @@ def create_app() -> Flask:
             "SELECT * FROM payment_providers WHERE code = ?", (order["payment_provider"],)
         )
         if crypto.is_crypto_provider(provider):
-            transfer = fetch_one(
-                "SELECT tx_id FROM crypto_transfers WHERE provider_code = ? AND tx_id = ?",
-                (order["payment_provider"], reference),
+            transfers = fetch_all(
+                """SELECT tx_id FROM crypto_transfers
+                   WHERE provider_code = ? AND (tx_id = ? OR (? IS NOT NULL AND tx_id LIKE ?))""",
+                (order["payment_provider"], key, like, like),
             )
-            if transfer:
+            if len(transfers) > 1:
+                flash("这笔交易包含多笔入账，请到“链上入账”页选择具体的一笔指派。", "error")
+                return redirect(url_for("admin_orders"))
+            if transfers:
                 # 已登记的链上入账：直接认领这笔入账并发卡，与“链上入账 → 指派”同一路径。
                 try:
                     status = crypto.assign_transfer(
-                        order["payment_provider"], transfer["tx_id"], order["order_no"],
+                        order["payment_provider"], transfers[0]["tx_id"], order["order_no"],
                         admin_override=True,
                     )
                 except ValueError as exc:
@@ -802,9 +844,10 @@ def create_app() -> Flask:
                     else:
                         flash(f"订单 {order_no} 已认领入账，但未能发卡，请查看订单。", "error")
                 return redirect(url_for("admin_orders"))
-            if TX_HASH_RE.fullmatch(reference):
+            if tx_hash:
                 flash("链上入账中没有这笔交易。请先在“链上入账”页扫描，确认到账后再补单。", "error")
                 return redirect(url_for("admin_orders"))
+        reference = key
         try:
             result = fulfill_order(
                 order_no=order["order_no"],
@@ -876,8 +919,8 @@ def ensure_default_admin() -> None:
                WHERE id = ?""",
             (hash_secret(password), existing["id"]),
         )
-    if username != "admin":
-        get_db().execute("DELETE FROM admin_users WHERE username = 'admin'")
+    # 本系统只有一个管理员：.env 改了用户名后，旧账号（及其旧密码）一律删除。
+    db.execute("DELETE FROM admin_users WHERE username != ?", (username,))
 
 
 def ensure_default_data() -> None:
@@ -991,7 +1034,6 @@ def clear_login_failures(ip: str) -> None:
 # 一次无订单号的查单最多校验这么多笔订单的密码，限制单次请求的 CPU 开销。
 QUERY_CANDIDATE_LIMIT = 5
 QUERY_LOCK_WINDOW = timedelta(minutes=15)
-TX_HASH_RE = re.compile(r"[0-9a-fA-F]{64}")
 PLACEHOLDER_SECRETS = {"change-this-to-a-long-random-string", "change-me", "secret", "dev-secret"}
 
 
@@ -1003,6 +1045,19 @@ def check_app_secret(secret: str | None, base_url: str) -> None:
         not secret or len(secret) < 32 or secret.strip() in PLACEHOLDER_SECRETS
     ):
         raise RuntimeError("生产环境的 APP_SECRET 必须是至少 32 位的随机字符串。")
+
+
+WEAK_ADMIN_PASSWORDS = {"change-me-now", "change-this-admin-password", "admin", "password"}
+
+
+def check_admin_credentials(base_url: str) -> None:
+    """HTTPS（生产）部署必须显式配置管理员账号和足够长的密码，不允许落到公开的默认值。"""
+    if not base_url.startswith("https://"):
+        return
+    username = os.getenv("ADMIN_USERNAME", "").strip()
+    password = os.getenv("ADMIN_PASSWORD", "")
+    if not username or len(password) < 12 or password in WEAK_ADMIN_PASSWORDS:
+        raise RuntimeError("生产环境必须在 .env 中设置 ADMIN_USERNAME 和至少 12 位的 ADMIN_PASSWORD。")
 
 
 def client_ip() -> str:
@@ -1103,7 +1158,7 @@ def category_options():
     return fetch_all("SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order ASC, id ASC")
 
 
-def enforce_order_limits(db, contact: str, ip: str) -> None:
+def enforce_order_limits(db, contact: str, ip: str, quantity: int = 1) -> None:
     """未付款订单会预占库存：限制每个买家同时待付款的订单数和下单频率。"""
     config = current_app.config
     pending_by_contact = db.execute(
@@ -1118,6 +1173,12 @@ def enforce_order_limits(db, contact: str, ip: str) -> None:
     ).fetchone()[0]
     if pending_by_ip >= config["ORDER_MAX_PENDING_PER_IP"]:
         raise ValueError("当前网络下未支付的订单过多，请先完成支付或等待订单过期后再下单。")
+    pending_cards = db.execute(
+        "SELECT COALESCE(SUM(quantity), 0) FROM orders WHERE client_ip = ? AND status = 'pending'",
+        (ip,),
+    ).fetchone()[0]
+    if pending_cards + quantity > config["ORDER_MAX_PENDING_CARDS_PER_IP"]:
+        raise ValueError("当前网络下未支付订单预占的数量过多，请先完成支付或减少购买数量。")
     recent = db.execute(
         "SELECT COUNT(*) FROM orders WHERE client_ip = ? AND created_at > ?",
         (ip, _since(timedelta(hours=1))),
@@ -1177,7 +1238,7 @@ def create_order(
         if quantity > product["buy_limit"]:
             raise ValueError(f"该商品单次最多购买 {product['buy_limit']} 件。")
         # 在写锁内检查，防止并发下单绕过限制。
-        enforce_order_limits(db, contact, client_ip)
+        enforce_order_limits(db, contact, client_ip, quantity)
 
         cards = db.execute(
             """
@@ -1262,12 +1323,15 @@ def fulfill_order(
     payload: dict,
     paid_at: str | None = None,
     admin_override: bool = False,
+    crypto_transfer_id: int | None = None,
 ):
     """Fulfill a confirmed payment after its adapter has verified authenticity.
 
     paid_at: 付款发生的时间（如链上区块时间）。扫描滞后时，按时付款的订单即使已被
     标记过期，也会尝试重新预占库存后发卡。
     admin_override: 管理员已人工核实收款，允许为过期/异常订单补发。
+    crypto_transfer_id: 链上入账记录。认领入账、记录支付、发卡和入账状态
+    在同一个事务里提交，不会出现“已发货但入账未匹配”的中间状态。
     """
     if not isinstance(trade_no, str) or not trade_no.strip():
         raise ValueError("支付流水号不能为空。")
@@ -1277,6 +1341,15 @@ def fulfill_order(
     order_no = order_no.upper()
     db = get_db()
     now = utcnow()
+
+    def settle(fulfilled: bool) -> None:
+        if crypto_transfer_id is not None:
+            db.execute(
+                "UPDATE crypto_transfers SET status = ?, order_no = ?, updated_at = ? WHERE id = ?",
+                ("matched" if fulfilled else "late", order_no, now, crypto_transfer_id),
+            )
+        db.commit()
+
     try:
         db.execute("BEGIN IMMEDIATE")
         order = db.execute("SELECT * FROM orders WHERE order_no = ?", (order_no,)).fetchone()
@@ -1304,9 +1377,12 @@ def fulfill_order(
         ):
             raise ValueError("支付流水号已用于其他订单或金额。")
         if order["status"] == "fulfilled":
+            if not previous_event:
+                # 已发货订单又来一笔新付款：多半是重复付款，不能记到这单上掩盖掉。
+                raise ValueError("该订单已发货，这笔付款不能再用于此订单（可能是重复付款，请核实后退款）。")
             if amount_cents != order["amount_cents"]:
                 raise ValueError("支付金额与订单金额不一致。")
-            db.commit()
+            settle(True)
             return order
         if not previous_event:
             db.execute(
@@ -1336,7 +1412,7 @@ def fulfill_order(
                     order, "已收到付款，但原预占卡密已释放且库存不足，请补货后手动补单。",
                     trade_no, now,
                 )
-                db.commit()
+                settle(False)
                 return get_order_or_404(order_no)
         else:
             mark_order_abnormal(
@@ -1345,11 +1421,11 @@ def fulfill_order(
                 trade_no,
                 now,
             )
-            db.commit()
+            settle(False)
             return get_order_or_404(order_no)
         if order["amount_cents"] != amount_cents:
             mark_order_abnormal(order, "支付金额与订单金额不一致。", trade_no, now)
-            db.commit()
+            settle(False)
             return get_order_or_404(order_no)
 
         cards = db.execute(
@@ -1365,7 +1441,7 @@ def fulfill_order(
             mark_order_abnormal(
                 order, "预占卡密数量与订单数量不一致。", trade_no, now
             )
-            db.commit()
+            settle(False)
             return get_order_or_404(order_no)
 
         delivered_content = "\n".join(row["content"] for row in cards)
@@ -1388,7 +1464,7 @@ def fulfill_order(
             """,
             (trade_no, delivered_content, now, now, order["id"]),
         )
-        db.commit()
+        settle(True)
         return get_order_or_404(order_no)
     except Exception:
         if db.in_transaction:

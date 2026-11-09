@@ -320,7 +320,9 @@ class CommerceTests(unittest.TestCase):
         order_no = self.order()
         first = self.fulfill(order_no)
         self.fulfill(order_no)
-        self.fulfill(order_no, trade="REPEATED-OTHER-TRADE")
+        # 已发货订单再来一笔不同的付款（重复付款）必须拒绝，不能悄悄记到这单上。
+        with self.assertRaises(ValueError):
+            self.fulfill(order_no, trade="REPEATED-OTHER-TRADE")
         order = self.persisted_order(order_no)
         self.assertEqual(order["delivered_content"], first["delivered_content"])
         self.assertEqual(order["payment_trade_no"], first["payment_trade_no"])
@@ -431,7 +433,7 @@ class CommerceTests(unittest.TestCase):
 
     def test_order_query_hashes_at_most_a_few_orders(self):
         self.app.config.update(ORDER_MAX_PENDING_PER_CONTACT=100, ORDER_MAX_PENDING_PER_IP=100,
-                               ORDER_CREATE_LIMIT_PER_HOUR=100)
+                               ORDER_CREATE_LIMIT_PER_HOUR=100, ORDER_MAX_PENDING_CARDS_PER_IP=100)
         product = self.seed_product(20)
         for _ in range(12):
             self.order(product=product)
@@ -544,6 +546,46 @@ class CommerceTests(unittest.TestCase):
         body = self.client.get("/?sort=price_asc").get_data(as_text=True)
         positions = [body.index(name) for name in ("Yuan one", "Yuan nine", "Dollar two")]
         self.assertEqual(positions, sorted(positions))
+    def test_large_quantity_orders_cannot_hoard_cards(self):
+        product = self.seed_product(15)
+        self.execute("UPDATE products SET buy_limit = 10 WHERE id = ?", (product,))
+        self.order(product=product, quantity=6)
+        values = {
+            "product_id": str(product), "quantity": "6", "contact": "other@example.com",
+            "query_password": "buyer-password", "payment_provider": "mock",
+            "csrf_token": self.token(self.client, f"/buy/{product}"),
+        }
+        self.assertNotIn("/checkout/", self.client.post("/orders", data=values).location)
+
+    def test_ticket_rate_limit_and_request_size_limit(self):
+        client = self.app.test_client()
+        for index in range(7):
+            self.post_form(client, "/tickets/new", {
+                "contact": f"user{index}@example.com", "subject": "help", "message": "please help me",
+            }, token_page="/tickets/new")
+        self.assertEqual(self.rows("SELECT COUNT(*) AS n FROM support_tickets")[0]["n"], 5)
+        big = client.post("/order-query", data={
+            "contact": "a@b.co", "query_password": "x" * 10, "junk": "y" * (6 * 1024 * 1024),
+            "csrf_token": self.token(client),
+        })
+        self.assertEqual(big.status_code, 413)
+
+    def test_production_requires_admin_credentials_and_drops_stale_admins(self):
+        self.execute(
+            "INSERT INTO admin_users (username, password_hash, created_at) VALUES ('old-admin', 'x', 'now')"
+        )
+        production = {"APP_BASE_URL": "https://shop.example.com", "APP_SECRET": "z" * 48}
+        with patch.dict(os.environ, production):
+            os.environ.pop("ADMIN_PASSWORD")
+            with self.assertRaises(RuntimeError):
+                create_app()
+        with patch.dict(os.environ, dict(production, ADMIN_PASSWORD="short")):
+            with self.assertRaises(RuntimeError):
+                create_app()
+        with patch.dict(os.environ, production):
+            create_app()
+        self.assertEqual([r["username"] for r in self.rows("SELECT username FROM admin_users")],
+                         ["operator@example.com"])
 
 if __name__ == "__main__":
     unittest.main()

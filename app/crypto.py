@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -37,9 +38,10 @@ MAINNET_USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 DEFAULT_API_BASE = "https://api.trongrid.io"
 # 订单过期后仍继续扫描一段时间，用来识别“按时付款但扫描滞后”和“迟到付款”。
 LATE_SCAN_WINDOW = timedelta(hours=6)
-# 过期订单的唯一金额在这段时间内不会分给新订单。必须不短于 LATE_SCAN_WINDOW，
-# 否则旧买家的迟到转账会和复用同一金额的新订单混淆，把卡发给新买家。
-SLOT_COOLDOWN = LATE_SCAN_WINDOW + timedelta(hours=1)
+# 一个唯一金额被任何订单（含已完成、已过期）使用后，这段时间内不会再分给新订单。
+# 否则旧买家的重复付款或迟到付款会和复用同一金额的新订单混淆，把卡发给新买家。
+# 小规模店铺 7 天内同一价位很难用满 max_slots 个尾数。
+SLOT_COOLDOWN = timedelta(days=7)
 
 DEFAULT_CONFIG = {
     "address": "",
@@ -189,8 +191,8 @@ def allocate_amount(
         for row in db.execute(
             """SELECT crypto_amount FROM orders
                WHERE payment_provider = ? AND crypto_address = ? AND crypto_amount IS NOT NULL
-                 AND (status = 'pending' OR (status = 'expired' AND expires_at > ?))""",
-            (provider_code, cfg.address, cooldown_since),
+                 AND (status = 'pending' OR created_at > ? OR expires_at > ?)""",
+            (provider_code, cfg.address, cooldown_since, cooldown_since),
         )
     }
     for slot in range(cfg.max_slots):
@@ -234,6 +236,29 @@ def fetch_transfers(cfg: CryptoConfig, min_time: datetime) -> list[Transfer]:
             break
         params["fingerprint"] = fingerprint
     return transfers
+
+
+def assign_event_keys(transfers: list[Transfer]) -> list[Transfer]:
+    """一笔链上交易可能包含多个 Transfer 事件（批量打款）。
+
+    TronGrid 的入账列表不返回事件序号，这里按稳定顺序给同一交易的第 2、3…笔
+    加上 “#2”、“#3” 后缀，每笔都单独记账；常见的单笔交易仍使用原交易号。
+    """
+    groups: dict[str, list[Transfer]] = {}
+    for transfer in transfers:
+        groups.setdefault(transfer.tx_id, []).append(transfer)
+    keyed: list[Transfer] = []
+    for tx_id, items in groups.items():
+        items = sorted(items, key=lambda t: (t.to_address, t.units, t.from_address))
+        for index, transfer in enumerate(items, start=1):
+            keyed.append(transfer if index == 1 else replace(transfer, tx_id=f"{tx_id}#{index}"))
+    return keyed
+
+
+def extract_tx_hash(text: str) -> str | None:
+    """从交易号或浏览器链接（如 tronscan）中提取 64 位交易哈希。"""
+    match = re.search(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])", text or "")
+    return match.group(0).lower() if match else None
 
 
 def _parse_transfer(item: dict, cfg: CryptoConfig) -> Transfer | None:
@@ -329,6 +354,7 @@ def assign_transfer(provider_code: str, tx_id: str, order_no: str, *, admin_over
     result = fulfill_order(
         order_no=order["order_no"],
         provider_code=provider_code,
+        crypto_transfer_id=row["id"],
         trade_no=tx_id,
         amount_cents=order["amount_cents"],
         payload={
@@ -342,12 +368,8 @@ def assign_transfer(provider_code: str, tx_id: str, order_no: str, *, admin_over
         paid_at=row["block_time"],
         admin_override=admin_override,
     )
-    status = "matched" if result["status"] == "fulfilled" else "late"
-    get_db().execute(
-        "UPDATE crypto_transfers SET status = ?, order_no = ?, updated_at = ? WHERE id = ?",
-        (status, order["order_no"], utcnow(), row["id"]),
-    )
-    return status
+    # 入账状态已在 fulfill_order 的同一事务里更新。
+    return "matched" if result["status"] == "fulfilled" else "late"
 
 
 # ---------------------------------------------------------------- 扫描调度
@@ -400,11 +422,23 @@ def scan_provider(provider, *, min_interval: float = 0, fetch=None) -> dict:
         since = datetime.fromisoformat(row["t"]) - timedelta(minutes=1)
         address_cfg = replace(cfg, address=row["address"])
         transfers.extend((fetch or fetch_transfers)(address_cfg, since))
+    transfers = assign_event_keys(transfers)
     results: dict[str, int] = {}
     for transfer in transfers:
         status = record_and_apply(provider["code"], transfer)
         results[status] = results.get(status, 0) + 1
     return {"scanned": True, "transfers": len(transfers), "results": results}
+
+
+def has_open_orders(provider_code: str) -> bool:
+    late_since = (datetime.now(UTC) - LATE_SCAN_WINDOW).replace(microsecond=0).isoformat()
+    return bool(fetch_one(
+        """SELECT 1 FROM orders
+           WHERE payment_provider = ?
+             AND (status = 'pending' OR (status = 'expired' AND expires_at > ?))
+           LIMIT 1""",
+        (provider_code, late_since),
+    ))
 
 
 def enabled_crypto_providers():
