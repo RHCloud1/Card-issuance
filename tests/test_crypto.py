@@ -469,5 +469,108 @@ class CurrencyAndLoginTests(CryptoTestBase):
             return dict(session)
 
 
+class LedgerConsistencyTests(CryptoTestBase):
+    """第三轮审查与本地渗透测试的回归用例。"""
+
+    def admin_confirm(self, order_no, reference):
+        admin = self.admin_client()
+        return admin.post(f"/test-admin/orders/{order_no}/confirm-paid", data={
+            "reference": reference, "csrf_token": self.token(admin, "/test-admin/orders"),
+        }, follow_redirects=True)
+
+    def test_fulfilled_amount_is_not_reused_and_duplicate_payment_stays_unmatched(self):
+        first = self.place_order()
+        units = self.order_row(first)["crypto_amount"]
+        self.scan(self.transfer(units, tx="T1"))
+        self.assertEqual(self.order_row(first)["status"], "fulfilled")
+        second = self.place_order(self.app.test_client())
+        self.assertNotEqual(self.order_row(second)["crypto_amount"], units)
+        self.scan(self.transfer(units, tx="T2"))  # 旧买家重复付款
+        self.assertEqual(self.order_row(second)["status"], "pending")
+        statuses = {r["tx_id"]: r["status"] for r in self.rows("SELECT * FROM crypto_transfers")}
+        self.assertEqual(statuses["T2"], "unmatched")
+
+    def test_every_transfer_in_one_transaction_is_recorded(self):
+        first = self.place_order()
+        second = self.place_order(self.app.test_client())
+        when = utcnow()
+        self.scan(
+            crypto.Transfer("BATCH", BUYER_ADDRESS, SHOP_ADDRESS, self.order_row(first)["crypto_amount"], when),
+            crypto.Transfer("BATCH", BUYER_ADDRESS, SHOP_ADDRESS, self.order_row(second)["crypto_amount"], when),
+        )
+        self.assertEqual(self.order_row(first)["status"], "fulfilled")
+        self.assertEqual(self.order_row(second)["status"], "fulfilled")
+        self.assertEqual(sorted(r["tx_id"] for r in self.rows("SELECT tx_id FROM crypto_transfers")),
+                         ["BATCH", "BATCH#2"])
+        # 重复扫描结果稳定，不会多记
+        self.scan(
+            crypto.Transfer("BATCH", BUYER_ADDRESS, SHOP_ADDRESS, self.order_row(second)["crypto_amount"], when),
+            crypto.Transfer("BATCH", BUYER_ADDRESS, SHOP_ADDRESS, self.order_row(first)["crypto_amount"], when),
+        )
+        self.assertEqual(len(self.rows("SELECT * FROM crypto_transfers")), 2)
+        self.assertEqual(len(self.rows("SELECT * FROM payment_events")), 2)
+
+    def test_manual_confirm_recognises_explorer_links(self):
+        first = self.place_order()
+        second = self.place_order(self.app.test_client())
+        tx = "e" * 64
+        self.scan(self.transfer(self.order_row(first)["crypto_amount"], tx=tx))
+        for reference in (f"https://tronscan.org/#/transaction/{tx}", f"付款 {tx.upper()} 已核实"):
+            self.admin_confirm(second, reference)
+        self.assertEqual(self.order_row(second)["status"], "pending")
+        self.assertEqual(len(self.rows("SELECT * FROM cards WHERE status = 'sold'")), 1)
+
+    def test_manual_confirm_with_multi_transfer_tx_requires_choosing_one(self):
+        order_no = self.place_order()
+        tx = "f" * 64
+        when = utcnow()
+        self.scan(crypto.Transfer(tx, BUYER_ADDRESS, SHOP_ADDRESS, 1_000_000, when),
+                  crypto.Transfer(tx, BUYER_ADDRESS, SHOP_ADDRESS, 2_000_000, when))
+        self.admin_confirm(order_no, tx)
+        self.assertEqual(self.order_row(order_no)["status"], "pending")
+
+    def test_extra_transfer_cannot_be_assigned_to_fulfilled_order(self):
+        first = self.place_order()
+        self.place_order(self.app.test_client())  # 保持有未结清订单，扫描才会运行
+        self.scan(self.transfer(self.order_row(first)["crypto_amount"], tx="T1"))
+        self.scan(self.transfer(9_990_000, tx="T2"))  # 多付的一笔
+        with self.app.app_context(), self.assertRaises(ValueError):
+            crypto.assign_transfer("usdt_trc20", "T2", first, admin_override=True)
+        statuses = {r["tx_id"]: (r["status"], r["order_no"]) for r in self.rows("SELECT * FROM crypto_transfers")}
+        self.assertEqual(statuses["T2"], ("unmatched", None))
+        self.assertEqual(statuses["T1"], ("matched", first))
+
+    def test_transfer_status_rolls_back_with_failed_fulfilment(self):
+        order_no = self.place_order()
+        units = self.order_row(order_no)["crypto_amount"]
+        import app.main as main_module
+        # 在发卡事务中途（写入支付记录时）模拟崩溃
+        with patch.object(main_module.json, "dumps", side_effect=RuntimeError("crash")):
+            with self.assertRaises(RuntimeError):
+                self.scan(self.transfer(units, tx="T1"))
+        # 发卡事务未提交，入账也保持未匹配，下次扫描可以重试
+        self.assertEqual(self.order_row(order_no)["status"], "pending")
+        self.assertEqual(self.rows("SELECT status FROM crypto_transfers")[0]["status"], "unmatched")
+        self.scan(self.transfer(units, tx="T1"))
+        self.assertEqual(self.order_row(order_no)["status"], "fulfilled")
+        self.assertEqual(self.rows("SELECT status FROM crypto_transfers")[0]["status"], "matched")
+
+    def test_contract_change_blocked_while_orders_open(self):
+        self.place_order()
+        admin = self.admin_client()
+        page = "/test-admin/payments/usdt_trc20/edit"
+
+        def save(**overrides):
+            config = dict(crypto.DEFAULT_CONFIG, address=SHOP_ADDRESS, **overrides)
+            admin.post(page, data={
+                "name": "USDT", "fee_rate": "0", "is_enabled": "1",
+                "config_json": json.dumps(config), "csrf_token": self.token(admin, page),
+            })
+            return json.loads(self.rows(
+                "SELECT config_json FROM payment_providers WHERE code = 'usdt_trc20'")[0]["config_json"])
+
+        self.assertEqual(save(api_base="https://nile.trongrid.io")["api_base"], crypto.DEFAULT_API_BASE)
+        self.assertEqual(save(cny_per_usdt="7.10")["cny_per_usdt"], "7.10")  # 其他配置照常可改
+
 if __name__ == "__main__":
     unittest.main()
