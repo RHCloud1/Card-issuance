@@ -12,8 +12,8 @@
 - 下单必须设置取卡密码；查单 / 取卡密码按 IP 和邮箱限制失败次数（`QUERY_MAX_FAILURES`，默认 15 分钟 8 次）
 - 防止未付款订单占光库存：同一邮箱最多 2 笔、同一 IP 最多 3 笔待支付订单，同一 IP 每小时最多下 10 单（`ORDER_MAX_PENDING_PER_CONTACT` / `ORDER_MAX_PENDING_PER_IP` / `ORDER_CREATE_LIMIT_PER_HOUR`）
 - 同一 IP 的待支付订单合计最多预占 10 张卡密（`ORDER_MAX_PENDING_CARDS_PER_IP`），售后工单每 IP 每小时 5 张（`TICKET_LIMIT_PER_HOUR`），请求体上限 5MB
-- HTTPS 部署必须在 `.env` 设置 `ADMIN_USERNAME` 和至少 12 位的 `ADMIN_PASSWORD`，否则拒绝启动；`.env` 之外的旧管理员账号启动时自动删除
-- 后台退出或更换 `ADMIN_PASSWORD` 后，所有旧会话 Cookie 立即失效；HTTPS 部署自动启用 Secure Cookie、HSTS 和防嵌入响应头；`APP_SECRET` 为示例值时拒绝启动
+- 生产部署（HTTPS，或 `APP_BASE_URL` 不是 localhost 的 HTTP 直连）必须在 `.env` 设置 `ADMIN_USERNAME` 和至少 12 位的 `ADMIN_PASSWORD`、至少 32 位的 `APP_SECRET`，且不能开启模拟支付，否则拒绝启动；`.env` 之外的旧管理员账号启动时自动删除
+- 后台退出或更换 `ADMIN_PASSWORD` 后，所有旧会话 Cookie 立即失效；登录满 `ADMIN_SESSION_HOURS`（默认 12）小时须重新登录；HTTPS 部署自动启用 Secure Cookie、HSTS 和防嵌入响应头；`APP_SECRET` 为示例值时拒绝启动
 - 前台工单提交
 - 后台管理员登录
 - 后台分类新增、编辑、删除
@@ -102,9 +102,9 @@ chmod +x scripts/*.sh
 脚本会依次处理：
 
 1. 安装 Git、Docker 和 Docker Compose Plugin
-2. 克隆项目到你指定的目录，默认 `/opt/card-issuance`
+2. 克隆项目到 `/opt/card-issuance`（非 root 用户为 `~/card-issuance`；需要其他目录时在命令前加 `INSTALL_DIR=/你的目录`）
 3. 询问部署模式
-4. 询问域名、后台路径、管理员邮箱、管理员密码等配置
+4. 询问域名（或端口）、管理员账号和密码，并核对域名解析、端口占用和密码强度
 5. 生成 `.env`
 6. 生成 `docker-compose.override.yml`
 7. 如果选择 HTTPS，自动生成 Caddy 配置并申请证书
@@ -146,7 +146,7 @@ https://你的域名/
 
 选择 HTTPS 模式时，宿主机 TCP `80` 和 `443` 默认明确由 Card Issuance 的 Caddy 使用。安装程序会在构建前检查这两个端口；发现已有监听时会输出 `ss` 监听信息和 Docker 端口映射，但不会停止或修改任何现有服务。
 
-同一台 VPS 上运行的 V2bX 等节点不能同时占用 TCP `80` 或 `443`。请将这些节点改用其他 TCP 端口，或者选择 HTTP 直连模式并由现有的 Nginx、宝塔或外部反向代理负责 HTTPS。
+同一台 VPS 上运行的 V2bX 等节点不能同时占用 TCP `80` 或 `443`。请将这些节点改用其他 TCP 端口，或者在 setup.sh 中选择模式 3，由现有的 Nginx、宝塔或外部反向代理负责 HTTPS。
 
 也就是说：
 
@@ -218,16 +218,20 @@ chmod +x scripts/*.sh
 ./scripts/setup.sh
 ```
 
-脚本会询问以下信息：
+脚本只询问部署必须的信息：
 
-- 部署模式：HTTPS + Caddy，或 HTTP 直连端口
-- 域名：HTTPS 模式必填，且 DNS 必须指向当前服务器
-- TLS 证书邮箱：用于 Let's Encrypt
-- 站点名称
-- 后台路径
-- 管理员登录邮箱
-- 管理员密码
-- 订单过期分钟数
+- 部署模式：
+  1. HTTPS + 内置 Caddy（推荐）
+  2. HTTP 直连端口（仅测试）
+  3. 本机已有 Nginx / 宝塔等反向代理
+- 模式 1：域名。脚本会核对 A / AAAA 记录是否指向本服务器，解析不到或指向别处时默认停下让你修改（证书反复申请失败会被 Let's Encrypt 限流）
+- 模式 2：公开 IP 或域名（默认自动检测的公网 IP）、端口（检查是否被占用）
+- 模式 3：买家访问的地址（如 `https://shop.example.com`）、本机端口
+- 管理员账号（3-64 位，不含空格，建议用邮箱）和管理员密码（至少 12 位、两次一致、不能是示例密码或与账号相同）
+
+写入配置前会显示汇总并要求确认。其余设置使用默认值：后台路径随机生成（部署完成时显示），站点名称默认 `Card Issuance`、订单 15 分钟过期，可在 `.env` 中修改 `APP_NAME`、`ORDER_EXPIRE_MINUTES` 后执行 `docker compose up -d`。管理员账号是有效邮箱时会作为 Let's Encrypt 联系邮箱。
+
+再次运行 `setup.sh` 会先确认，并把旧的 `.env`、`Caddyfile`、`docker-compose.override.yml` 备份为 `*.bak-时间`，原 `APP_SECRET` 保留不变；数据库不受影响。只升级程序请用 `update.sh`。
 
 访问：
 
@@ -236,7 +240,7 @@ chmod +x scripts/*.sh
 
 ## 宝塔、Nginx 或 Caddy
 
-如果你不用本项目内置 Caddy，也可以选择 HTTP 直连模式，让 Docker 提供 HTTP 端口，由宝塔、Nginx 或外部反向代理负责域名和 HTTPS。这种架构适用于需要保留同机 V2bX、Nginx 或其他服务占用 TCP `80/443` 的场景。
+如果你不用本项目内置 Caddy，在 `setup.sh` 中选择模式 3（已有反向代理）：应用端口只绑定 `127.0.0.1`，并自动设置 `TRUSTED_PROXY_COUNT=1`，由宝塔、Nginx 或外部反向代理负责域名和 HTTPS。这种架构适用于需要保留同机 V2bX、Nginx 或其他服务占用 TCP `80/443` 的场景。
 
 如果反代服务和应用在同一个 Docker 网络里，反向代理目标可以是：
 
@@ -267,7 +271,9 @@ server {
 }
 ```
 
-生产环境建议启用 HTTPS。
+手动配置时，端口映射请只绑定本机，例如 `docker-compose.override.yml` 里写 `"127.0.0.1:8080:8080"`，并在 `.env` 设置 `TRUSTED_PROXY_COUNT=1`。如果端口仍对公网开放，任何人都能绕过 Nginx 直连并伪造 `X-Forwarded-For`，使登录和取卡密码的失败次数限制失效；反过来不设 `TRUSTED_PROXY_COUNT`，所有买家会被识别成同一个 IP，一个人就能把所有人锁住。
+
+生产环境请务必启用 HTTPS：HTTP 下管理员密码、取卡密码和卡密都以明文在网络上传输。
 
 ## 后续一键更新
 
@@ -386,7 +392,7 @@ Windows PowerShell：
 
 生产账号密码不要写入代码仓库，应通过 `.env` 设置。
 
-`dev.ps1` 会显式开启模拟支付，仅供本地演示。其他启动方式需要设置 `ENABLE_MOCK_PAYMENTS=1`，并确认后台模拟通道已开启；生产部署保持 `ENABLE_MOCK_PAYMENTS=0`。这个环境开关关闭时，即使数据库通道被开启，模拟下单和模拟成功接口仍不可用。
+`dev.ps1` 会显式开启模拟支付，仅供本地演示。其他启动方式需要设置 `ENABLE_MOCK_PAYMENTS=1`，并确认后台模拟通道已开启；生产部署保持 `ENABLE_MOCK_PAYMENTS=0`（`APP_BASE_URL` 不是 localhost 时开启会拒绝启动）。这个环境开关关闭时，即使数据库通道被开启，模拟下单和模拟成功接口仍不可用。
 
 本地回归检查：
 

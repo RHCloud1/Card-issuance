@@ -36,6 +36,8 @@ fi
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
 mkdir -p backups
+# 旧部署的 data/、backups/ 可能对同机其他用户可读（里面有卡密和买家信息）。
+chmod 700 data backups 2>/dev/null || true
 snapshot_dir="$(mktemp -d backups/.snapshot-XXXXXXXX)"
 cleanup_snapshot() {
   rm -f "$snapshot_dir/data/card_issuance.sqlite3" "$snapshot_dir/archive.tar.gz"

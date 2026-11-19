@@ -514,7 +514,8 @@ class CommerceTests(unittest.TestCase):
         self.assertNotIn("Strict-Transport-Security", response.headers)
         self.assertFalse(self.app.config["SESSION_COOKIE_SECURE"])
         with patch.dict(os.environ, {"APP_BASE_URL": "https://shop.example.com",
-                                     "APP_SECRET": "x" * 48, "TRUSTED_PROXY_COUNT": "1"}):
+                                     "APP_SECRET": "x" * 48, "TRUSTED_PROXY_COUNT": "1",
+                                     "ENABLE_MOCK_PAYMENTS": ""}):
             secure_app = create_app()
         self.assertTrue(secure_app.config["SESSION_COOKIE_SECURE"])
         response = secure_app.test_client().get("/", headers={"X-Forwarded-Proto": "https"})
@@ -574,7 +575,8 @@ class CommerceTests(unittest.TestCase):
         self.execute(
             "INSERT INTO admin_users (username, password_hash, created_at) VALUES ('old-admin', 'x', 'now')"
         )
-        production = {"APP_BASE_URL": "https://shop.example.com", "APP_SECRET": "z" * 48}
+        production = {"APP_BASE_URL": "https://shop.example.com", "APP_SECRET": "z" * 48,
+                      "ENABLE_MOCK_PAYMENTS": ""}
         with patch.dict(os.environ, production):
             os.environ.pop("ADMIN_PASSWORD")
             with self.assertRaises(RuntimeError):
@@ -586,6 +588,74 @@ class CommerceTests(unittest.TestCase):
             create_app()
         self.assertEqual([r["username"] for r in self.rows("SELECT username FROM admin_users")],
                          ["operator@example.com"])
+
+    def test_public_http_deployment_gets_production_checks(self):
+        public = {"APP_BASE_URL": "http://203.0.113.10:8080", "APP_SECRET": "p" * 48,
+                  "ENABLE_MOCK_PAYMENTS": ""}
+        for override in ({"APP_SECRET": "secret"},
+                         {"ADMIN_PASSWORD": "change-this-admin-password"},
+                         {"ENABLE_MOCK_PAYMENTS": "1"}):
+            with patch.dict(os.environ, dict(public, **override)):
+                with self.assertRaises(RuntimeError, msg=str(override)):
+                    create_app()
+        with patch.dict(os.environ, dict(public, APP_BASE_URL="https://shop.example.com",
+                                         ENABLE_MOCK_PAYMENTS="1")):
+            with self.assertRaises(RuntimeError):
+                create_app()
+        with patch.dict(os.environ, public):
+            create_app()
+
+    def test_order_query_timing_does_not_reveal_whether_email_has_orders(self):
+        order_no = self.order()
+        import app.main as main_module
+        calls = []
+        real_verify, real_burn = main_module.verify_secret, main_module.burn_secret_check
+
+        def counting_verify(value, encoded):
+            calls.append(1)
+            return real_verify(value, encoded)
+
+        def counting_burn(value):
+            calls.append(1)
+            return real_burn(value)
+
+        def hashes_for(contact, order_no=""):
+            calls.clear()
+            self.post_form(self.app.test_client(), "/order-query", {
+                "contact": contact, "order_no": order_no, "query_password": "wrong-password",
+            })
+            return len(calls)
+
+        with patch.object(main_module, "verify_secret", counting_verify), \
+                patch.object(main_module, "burn_secret_check", counting_burn):
+            expected = main_module.QUERY_CANDIDATE_LIMIT
+            self.assertEqual(hashes_for("buyer@example.com"), expected)
+            self.assertEqual(hashes_for("nobody@example.com"), expected)
+            self.assertEqual(hashes_for("buyer@example.com", order_no), 1)
+            self.assertEqual(hashes_for("nobody@example.com", order_no), 1)
+
+    def test_admin_login_hashes_even_for_unknown_username(self):
+        import app.main as main_module
+        calls = []
+        with patch.object(main_module, "burn_secret_check", lambda value: calls.append(value)):
+            self.post_form(self.app.test_client(), "/test-admin/login", {
+                "username": "not-an-admin@example.com", "password": "guess-password",
+            }, token_page="/test-admin/login")
+        self.assertEqual(calls, ["guess-password"])
+
+    def test_admin_session_expires(self):
+        admin = self.app.test_client()
+        self.admin_login(admin)
+        self.assertEqual(admin.get("/test-admin").status_code, 200)
+        with admin.session_transaction() as sess:
+            sess["admin_login_at"] -= int(13 * 3600)
+        self.assertEqual(admin.get("/test-admin").status_code, 302)
+        # 升级前签发、没有登录时间的旧会话也须重新登录
+        self.admin_login(admin)
+        with admin.session_transaction() as sess:
+            sess.pop("admin_login_at")
+        self.assertEqual(admin.get("/test-admin").status_code, 302)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,9 +5,10 @@ import functools
 import hashlib
 import hmac
 import secrets
+import time
 from urllib.parse import unquote, urlsplit
 
-from flask import abort, redirect, request, session, url_for
+from flask import abort, current_app, redirect, request, session, url_for
 
 
 PBKDF2_ITERATIONS = 260_000
@@ -45,6 +46,17 @@ def verify_secret(value: str, encoded: str) -> bool:
         return hmac.compare_digest(actual, expected)
     except Exception:
         return False
+
+
+_DUMMY_HASH = hash_secret(secrets.token_urlsafe(16))
+
+
+def burn_secret_check(value: str) -> None:
+    """做一次和真实校验等价的哈希计算但不比较结果。
+
+    账号或订单不存在时也调用，使响应时间与“存在但密码错误”一致，
+    防止通过耗时判断某个邮箱是否下过单、某个用户名是否是管理员。"""
+    verify_secret(value, _DUMMY_HASH)
 
 
 def csrf_token() -> str:
@@ -108,8 +120,16 @@ def login_required(view):
         admin = fetch_one(
             "SELECT session_version FROM admin_users WHERE id = ?", (admin_user_id,)
         )
-        # 退出或改密码会递增 session_version，复制走的旧 Cookie 随之失效。
-        if not admin or session.get("admin_session_version") != admin["session_version"]:
+        # 退出或改密码会递增 session_version，复制走的旧 Cookie 随之失效；
+        # 登录超过 ADMIN_SESSION_HOURS 的会话也须重新登录（被盗的 Cookie 不会长期有效）。
+        login_at = session.get("admin_login_at")
+        max_age = current_app.config["ADMIN_SESSION_HOURS"] * 3600
+        if (
+            not admin
+            or session.get("admin_session_version") != admin["session_version"]
+            or not isinstance(login_at, (int, float))
+            or time.time() - login_at > max_age
+        ):
             session.clear()
             return redirect(url_for("admin_login", next=request.path))
         return view(*args, **kwargs)

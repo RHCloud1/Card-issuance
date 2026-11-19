@@ -5,8 +5,10 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import (
     Flask,
@@ -26,6 +28,7 @@ from .db import close_db, fetch_all, fetch_one, get_db, init_db, is_database_bus
 from .formatting import CURRENCIES, cents_to_yuan, format_money, normalize_currency, yuan_to_cents
 from .security import (
     authorize_order,
+    burn_secret_check,
     can_reveal_order,
     csrf_token,
     hash_secret,
@@ -53,6 +56,8 @@ def create_app() -> Flask:
         # 同一 IP 在 LOGIN_LOCK_MINUTES 内登录失败 LOGIN_MAX_FAILURES 次后暂时锁定。
         LOGIN_MAX_FAILURES=int(os.getenv("LOGIN_MAX_FAILURES", "5")),
         LOGIN_LOCK_MINUTES=int(os.getenv("LOGIN_LOCK_MINUTES", "15")),
+        # 后台登录多少小时后必须重新登录。
+        ADMIN_SESSION_HOURS=float(os.getenv("ADMIN_SESSION_HOURS", "12") or 12),
         # 前面有几层可信反向代理（内置 Caddy 为 1）。直连模式保持 0，防止伪造 X-Forwarded-For。
         TRUSTED_PROXY_COUNT=int(os.getenv("TRUSTED_PROXY_COUNT", "0")),
         # 后台自动扫描 USDT 入账的间隔秒数；0 表示关闭（仅订单页轮询和后台手动扫描）。
@@ -76,6 +81,7 @@ def create_app() -> Flask:
     app.config["SESSION_COOKIE_SECURE"] = app.config["APP_BASE_URL"].startswith("https://")
     check_app_secret(os.getenv("APP_SECRET"), app.config["APP_BASE_URL"])
     check_admin_credentials(app.config["APP_BASE_URL"])
+    check_mock_payments(app.config["ENABLE_MOCK_PAYMENTS"], app.config["APP_BASE_URL"])
     admin_path = app.config["ADMIN_PATH"]
     if app.config["TRUSTED_PROXY_COUNT"] > 0:
         from werkzeug.middleware.proxy_fix import ProxyFix
@@ -351,6 +357,11 @@ def create_app() -> Flask:
                     order for order in candidates
                     if verify_secret(query_password, order["query_password_hash"])
                 ]
+                # 补足固定次数的哈希计算：响应耗时不随该邮箱有几笔订单变化，
+                # 不能借耗时探测某个邮箱是否在本店下过单。
+                expected = 1 if order_no else QUERY_CANDIDATE_LIMIT
+                for _ in range(expected - len(candidates)):
+                    burn_secret_check(query_password)
                 if found_orders:
                     for order in found_orders:
                         authorize_order(order["order_no"])
@@ -412,6 +423,8 @@ def create_app() -> Flask:
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "")
             admin = fetch_one("SELECT * FROM admin_users WHERE username = ?", (username,))
+            if not admin:
+                burn_secret_check(password)  # 用户名不存在时耗时一致，不泄露管理员账号
             if not (admin and verify_secret(password, admin["password_hash"])):
                 record_login_failure(client_ip)
                 app.logger.warning("Admin login failed from %s", client_ip)
@@ -421,6 +434,7 @@ def create_app() -> Flask:
                 session["admin_user_id"] = admin["id"]
                 session["admin_username"] = admin["username"]
                 session["admin_session_version"] = admin["session_version"]
+                session["admin_login_at"] = int(time.time())
                 csrf_token()
                 flash("已登录后台。", "success")
                 return redirect(
@@ -1037,11 +1051,23 @@ QUERY_LOCK_WINDOW = timedelta(minutes=15)
 PLACEHOLDER_SECRETS = {"change-this-to-a-long-random-string", "change-me", "secret", "dev-secret"}
 
 
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def is_production(base_url: str) -> bool:
+    """HTTPS 或非本机地址（包括 HTTP 直连公网 IP）都按生产环境做启动检查。"""
+    try:
+        host = urlsplit(base_url).hostname or ""
+    except ValueError:
+        return True
+    return base_url.startswith("https://") or host not in LOCAL_HOSTS
+
+
 def check_app_secret(secret: str | None, base_url: str) -> None:
     """拒绝用公开的示例密钥启动：知道密钥的人可以伪造后台会话。"""
     if secret and secret.strip() == "change-this-to-a-long-random-string":
         raise RuntimeError("APP_SECRET 仍是 .env.example 的示例值，请改为随机长字符串。")
-    if base_url.startswith("https://") and (
+    if is_production(base_url) and (
         not secret or len(secret) < 32 or secret.strip() in PLACEHOLDER_SECRETS
     ):
         raise RuntimeError("生产环境的 APP_SECRET 必须是至少 32 位的随机字符串。")
@@ -1051,13 +1077,19 @@ WEAK_ADMIN_PASSWORDS = {"change-me-now", "change-this-admin-password", "admin", 
 
 
 def check_admin_credentials(base_url: str) -> None:
-    """HTTPS（生产）部署必须显式配置管理员账号和足够长的密码，不允许落到公开的默认值。"""
-    if not base_url.startswith("https://"):
+    """生产部署必须显式配置管理员账号和足够长的密码，不允许落到公开的默认值。"""
+    if not is_production(base_url):
         return
     username = os.getenv("ADMIN_USERNAME", "").strip()
     password = os.getenv("ADMIN_PASSWORD", "")
     if not username or len(password) < 12 or password in WEAK_ADMIN_PASSWORDS:
         raise RuntimeError("生产环境必须在 .env 中设置 ADMIN_USERNAME 和至少 12 位的 ADMIN_PASSWORD。")
+
+
+def check_mock_payments(enabled: bool, base_url: str) -> None:
+    """模拟支付任何人点一下就能免费拿卡，只允许在本机演示时开启。"""
+    if enabled and is_production(base_url):
+        raise RuntimeError("ENABLE_MOCK_PAYMENTS 只能在本机测试（APP_BASE_URL 为 localhost）时开启。")
 
 
 def client_ip() -> str:
@@ -1627,4 +1659,9 @@ def card_counts(product_id: int) -> dict[str, int]:
 
 
 if __name__ == "__main__":
-    create_app().run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=True)
+    # 仅供本机调试：Werkzeug 调试器可执行任意代码，绝不能监听公网地址。
+    create_app().run(
+        host="127.0.0.1",
+        port=int(os.getenv("PORT", "8080")),
+        debug=os.getenv("FLASK_DEBUG") == "1",
+    )

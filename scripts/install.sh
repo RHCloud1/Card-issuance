@@ -6,19 +6,6 @@ RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/RHCloud1/Card-issuance/m
 
 echo "开始安装 Card Issuance..."
 
-prompt() {
-  local label="$1"
-  local default="${2:-}"
-  local value
-  if [ -n "$default" ]; then
-    read -r -p "$label [$default]: " value
-    printf '%s' "${value:-$default}"
-  else
-    read -r -p "$label: " value
-    printf '%s' "$value"
-  fi
-}
-
 run_as_root() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
@@ -52,19 +39,21 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ "$(id -u)" -eq 0 ]; then
-  default_install_dir="/opt/card-issuance"
+# 安装目录不再询问：默认 /opt/card-issuance（非 root 为 ~/card-issuance），需要时用 INSTALL_DIR 指定。
+if [ -n "${INSTALL_DIR:-}" ]; then
+  install_dir="$INSTALL_DIR"
+elif [ "$(id -u)" -eq 0 ]; then
+  install_dir="/opt/card-issuance"
 else
-  default_install_dir="$HOME/card-issuance"
+  install_dir="$HOME/card-issuance"
 fi
-
-install_dir="$(prompt "安装目录" "$default_install_dir")"
+echo "安装目录：$install_dir"
 
 if [ -d "$install_dir/.git" ]; then
   echo "在 $install_dir 发现已有仓库。正在更新..."
   git -C "$install_dir" pull --ff-only
 elif [ -e "$install_dir" ]; then
-  echo "$install_dir 已存在，但不是 Git 仓库。请选择另一个目录或删除此目录。" >&2
+  echo "$install_dir 已存在，但不是 Git 仓库。请用 INSTALL_DIR=其他目录 重新运行，或删除此目录。" >&2
   exit 1
 else
   git clone "$REPO_URL" "$install_dir"
@@ -72,4 +61,9 @@ fi
 
 cd "$install_dir"
 chmod +x scripts/*.sh
-./scripts/setup.sh
+# 通过 curl ... | bash 运行时标准输入是脚本本身，交互问题改从终端读取。
+if [ ! -t 0 ] && [ -r /dev/tty ]; then
+  ./scripts/setup.sh < /dev/tty
+else
+  ./scripts/setup.sh
+fi

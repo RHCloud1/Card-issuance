@@ -30,7 +30,8 @@ if [[ "$app_base_url" == https://* ]] && docker compose config --services | grep
   domain="${app_base_url#https://}"
   domain="${domain%%/*}"
   https_ready=false
-  for ((attempt = 1; attempt <= 12; attempt++)); do
+  # 首次申请证书可能需要一两分钟。
+  for ((attempt = 1; attempt <= 24; attempt++)); do
     if curl --silent --show-error --fail --head \
       --max-time 5 \
       --resolve "$domain:443:127.0.0.1" \

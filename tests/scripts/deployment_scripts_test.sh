@@ -178,21 +178,32 @@ EOF
   cat > "$fixture/fake-bin/ss" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-filter_port=""
-arguments="$*"
-if [[ "$arguments" == *":80"* && "$arguments" == *":443"* ]]; then
-  filter_port=""
-elif [[ "$arguments" == *":80"* ]]; then
-  filter_port="80"
-elif [[ "$arguments" == *":443"* ]]; then
-  filter_port="443"
-fi
+# Every "sport = :N" filter in the arguments selects port N exactly.
+ports="$(grep -oE 'sport = :[0-9]+' <<< "$*" | sed 's/.*://' || true)"
 
 for endpoint in ${FAKE_SS_ENDPOINTS:-}; do
   endpoint_port="${endpoint##*:}"
-  if [ -z "$filter_port" ] || [ "$endpoint_port" = "$filter_port" ]; then
+  if [ -z "$ports" ] || grep -Fxq -- "$endpoint_port" <<< "$ports"; then
     printf 'LISTEN 0 4096 %s 0.0.0.0:*\n' "$endpoint"
   fi
+done
+EOF
+
+  cat > "$fixture/fake-bin/getent" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  ahostsv4) records="${FAKE_DOMAIN_IPV4:-}" ;;
+  ahostsv6)
+    records="${FAKE_DOMAIN_IPV6:-}"
+    # glibc answers AAAA lookups with IPv4-mapped addresses when only A exists.
+    for address in ${FAKE_DOMAIN_IPV4:-}; do records="$records ::ffff:$address"; done
+    ;;
+  *) exit 2 ;;
+esac
+[ -n "${records// /}" ] || exit 2
+for address in $records; do
+  printf '%s STREAM %s\n' "$address" "${2:-}"
 done
 EOF
 
@@ -200,6 +211,11 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_CURL_LOG"
+
+case " $* " in
+  *"api.ipify.org"*) printf '%s' "${FAKE_PUBLIC_IPV4:-}"; exit 0 ;;
+  *"api6.ipify.org"*) [ -n "${FAKE_PUBLIC_IPV6:-}" ] || exit 6; printf '%s' "$FAKE_PUBLIC_IPV6"; exit 0 ;;
+esac
 
 result="${FAKE_CURL_RESULT:-success}"
 case " $* " in
@@ -236,7 +252,8 @@ printf 'git %s\n' "$*" >> "$FAKE_DOCKER_LOG"
 EOF
 
   chmod +x "$fixture/fake-bin/docker" "$fixture/fake-bin/ss" "$fixture/fake-bin/curl" \
-    "$fixture/fake-bin/nslookup" "$fixture/fake-bin/sleep" "$fixture/fake-bin/git"
+    "$fixture/fake-bin/nslookup" "$fixture/fake-bin/sleep" "$fixture/fake-bin/git" \
+    "$fixture/fake-bin/getent"
   export FAKE_DOCKER_LOG="$fixture/docker.log"
   export FAKE_CURL_LOG="$fixture/curl.log"
   export FAKE_NSLOOKUP_LOG="$fixture/nslookup.log"
@@ -254,25 +271,25 @@ EOF
   export FAKE_DNS_RESULT=success
   export FAKE_APP_RESULT=success
   export FAKE_BACKUP_RESULT=success
+  export FAKE_PUBLIC_IPV4=203.0.113.10
+  export FAKE_PUBLIC_IPV6=""
+  export FAKE_DOMAIN_IPV4=203.0.113.10
+  export FAKE_DOMAIN_IPV6=""
+}
+
+# Feeds one answer per line to setup.sh; the arguments are the answers.
+run_setup() {
+  set +e
+  printf '%s\n' "$@" \
+    | (cd "$fixture" && PATH="$fixture/fake-bin:$PATH" bash ./scripts/setup.sh) > "$fixture/setup.out" 2>&1
+  setup_status=$?
+  set -e
 }
 
 run_https_setup() {
-  local output="$fixture/setup.out"
   local password="${TEST_ADMIN_PASSWORD:-correct-horse-battery-staple}"
-  set +e
-  printf '%s\n' \
-    '1' \
-    '' \
-    '' \
-    '' \
-    'admin@example.com' \
-    "$password" \
-    "$password" \
-    'card.example.test' \
-    '' \
-    | (cd "$fixture" && PATH="$fixture/fake-bin:$PATH" bash ./scripts/setup.sh) > "$output" 2>&1
-  setup_status=$?
-  set -e
+  run_setup '1' 'card.example.test' "${TEST_ADMIN_USERNAME:-admin@example.com}" \
+    "$password" "$password" ''
 }
 
 run_https_setup_without_curl() {
@@ -602,16 +619,149 @@ EOF
 test_setup_rejects_unready_http_application() {
   make_fixture
   export FAKE_APP_RESULT=failure
-  set +e
-  printf '%s\n' '2' '' '' '' 'admin@example.com' 'test-password' 'test-password' \
-    '127.0.0.1' '8080' \
-    | (cd "$fixture" && PATH="$fixture/fake-bin:$PATH" bash ./scripts/setup.sh) \
-      > "$fixture/setup.out" 2>&1
-  setup_status=$?
-  set -e
+  run_setup '2' '127.0.0.1' '8080' 'admin@example.com' 'test-password' 'test-password' ''
   assert_failure
   assert_contains "$fixture/setup.out" '应用 HTTP 服务尚未就绪'
   assert_not_contains "$fixture/setup.out" '部署完成'
+}
+
+test_https_setup_writes_random_admin_path_and_skips_reserved_acme_email() {
+  make_fixture
+  run_https_setup
+  assert_success
+  grep -Eq '^ADMIN_PATH=/admin-[0-9a-f]{10}$' "$fixture/.env" || fail 'expected a random ADMIN_PATH'
+  assert_contains "$fixture/.env" 'APP_BASE_URL=https://card.example.test'
+  assert_contains "$fixture/.env" 'TRUSTED_PROXY_COUNT=1'
+  assert_contains "$fixture/setup.out" '管理后台：https://card.example.test/admin-'
+  # Let's Encrypt rejects example.com contacts, so no email line is written.
+  assert_not_contains "$fixture/Caddyfile" 'email'
+
+  make_fixture
+  TEST_ADMIN_USERNAME='ops@shop-owner.net' run_https_setup
+  assert_success
+  assert_contains "$fixture/Caddyfile" 'email ops@shop-owner.net'
+}
+
+test_https_setup_stops_when_domain_points_elsewhere() {
+  make_fixture
+  export FAKE_DOMAIN_IPV4=198.51.100.7
+  run_setup '1' 'card.example.test' 'n'
+  assert_failure
+  assert_contains "$fixture/setup.out" 'A 记录没有指向本服务器（203.0.113.10）'
+  assert_not_contains "$FAKE_DOCKER_LOG" 'compose up'
+  [ ! -f "$fixture/.env" ] || fail 'setup wrote .env before the domain was confirmed'
+}
+
+test_https_setup_rejects_unresolved_domain() {
+  make_fixture
+  export FAKE_DOMAIN_IPV4=""
+  run_setup '1' 'card.example.test' 'n'
+  assert_failure
+  assert_contains "$fixture/setup.out" '解析不到任何地址'
+  assert_not_contains "$FAKE_DOCKER_LOG" 'compose up'
+}
+
+test_https_setup_warns_about_aaaa_record_not_on_this_server() {
+  make_fixture
+  export FAKE_DOMAIN_IPV6=2001:db8::1
+  run_setup '1' 'card.example.test' 'y' 'admin@example.com' \
+    'correct-horse-battery-staple' 'correct-horse-battery-staple' ''
+  assert_success
+  assert_contains "$fixture/setup.out" 'AAAA（IPv6）记录'
+  assert_not_contains "$fixture/setup.out" 'A 记录没有指向本服务器'
+}
+
+test_setup_rejects_weak_admin_passwords_until_valid() {
+  make_fixture
+  run_setup '1' 'card.example.test' 'admin@example.com' \
+    'short' 'short' \
+    'change-this-admin-password' 'change-this-admin-password' \
+    'admin@example.com' 'admin@example.com' \
+    'first-password-1' 'second-password-2' \
+    'correct-horse-battery-staple' 'correct-horse-battery-staple' ''
+  assert_success
+  assert_contains "$fixture/setup.out" '密码短于 12 位'
+  assert_contains "$fixture/setup.out" '不能使用示例密码'
+  assert_contains "$fixture/setup.out" '不能与管理员账号相同'
+  assert_contains "$fixture/setup.out" '两次输入的密码不一致'
+  assert_contains "$fixture/.env" 'ADMIN_PASSWORD="correct-horse-battery-staple"'
+}
+
+test_setup_rejects_admin_username_with_spaces() {
+  make_fixture
+  run_setup '1' 'card.example.test' 'my admin' 'ab' 'owner@shop-owner.net' \
+    'correct-horse-battery-staple' 'correct-horse-battery-staple' ''
+  assert_success
+  assert_line_count "$fixture/setup.out" '管理员账号需为 3-64 位' 2
+  assert_contains "$fixture/.env" 'ADMIN_USERNAME="owner@shop-owner.net"'
+}
+
+test_setup_cancel_at_confirmation_writes_nothing() {
+  make_fixture
+  run_setup '1' 'card.example.test' 'admin@example.com' \
+    'correct-horse-battery-staple' 'correct-horse-battery-staple' 'n'
+  assert_success
+  assert_contains "$fixture/setup.out" '已取消'
+  [ ! -f "$fixture/.env" ] || fail 'cancelled setup wrote .env'
+  assert_not_contains "$FAKE_DOCKER_LOG" 'compose up'
+}
+
+test_proxy_setup_binds_loopback_and_trusts_one_proxy() {
+  make_fixture
+  run_setup '3' 'https://Shop.Example.test/' '8080' 'admin@example.com' \
+    'correct-horse-battery-staple' 'correct-horse-battery-staple' ''
+  assert_success
+  assert_contains "$fixture/docker-compose.override.yml" '"127.0.0.1:8080:8080"'
+  assert_not_contains "$fixture/docker-compose.override.yml" 'caddy'
+  assert_contains "$fixture/.env" 'APP_BASE_URL=https://shop.example.test'
+  assert_contains "$fixture/.env" 'TRUSTED_PROXY_COUNT=1'
+  assert_contains "$fixture/setup.out" 'X-Forwarded-Proto'
+  [ ! -f "$fixture/Caddyfile" ] || fail 'proxy mode must not write a Caddyfile'
+}
+
+test_http_setup_rejects_busy_port_and_defaults_to_public_ip() {
+  make_fixture
+  export FAKE_SS_ENDPOINTS='0.0.0.0:8080'
+  run_setup '2' '' '8080' '8081' 'admin@example.com' \
+    'correct-horse-battery-staple' 'correct-horse-battery-staple' ''
+  assert_success
+  assert_contains "$fixture/setup.out" '端口 8080 已被其他程序占用'
+  assert_contains "$fixture/docker-compose.override.yml" '"0.0.0.0:8081:8080"'
+  # The detected public IP is the default answer for the host question.
+  assert_contains "$fixture/.env" 'APP_BASE_URL=http://203.0.113.10:8081'
+  assert_contains "$fixture/.env" 'TRUSTED_PROXY_COUNT=0'
+}
+
+test_setup_reconfigure_backs_up_and_keeps_session_secret() {
+  make_fixture
+  printf '%s\n' 'APP_SECRET=existing-secret-that-is-long-enough-1234567890' 'ADMIN_PATH=/admin-old' \
+    > "$fixture/.env"
+  printf '%s\n' 'old caddy' > "$fixture/Caddyfile"
+  run_setup 'y' '1' 'card.example.test' 'admin@example.com' \
+    'correct-horse-battery-staple' 'correct-horse-battery-staple' ''
+  assert_success
+  assert_contains "$fixture/.env" 'APP_SECRET=existing-secret-that-is-long-enough-1234567890'
+  compgen -G "$fixture/.env.bak-*" >/dev/null || fail 'expected a .env backup'
+  compgen -G "$fixture/Caddyfile.bak-*" >/dev/null || fail 'expected a Caddyfile backup'
+  assert_contains "$FAKE_DOCKER_LOG" 'compose up -d --build --remove-orphans'
+}
+
+test_setup_reconfigure_can_be_declined() {
+  make_fixture
+  printf '%s\n' 'APP_SECRET=keep-me' > "$fixture/.env"
+  cp "$fixture/.env" "$fixture/env.before"
+  run_setup 'n'
+  assert_success
+  cmp -s "$fixture/env.before" "$fixture/.env" || fail 'declined reconfigure changed .env'
+  assert_not_contains "$FAKE_DOCKER_LOG" 'compose up'
+}
+
+test_setup_aborts_when_input_ends() {
+  make_fixture
+  run_setup '1' 'card.example.test'
+  assert_failure
+  assert_contains "$fixture/setup.out" '输入已结束'
+  assert_not_contains "$FAKE_DOCKER_LOG" 'compose up'
 }
 
 prepare_update_fixture() {
@@ -755,6 +905,18 @@ tests=(
   test_maintenance_scripts_include_chinese_output_and_dns_diagnostics
   test_setup_preserves_password_literals
   test_setup_rejects_unready_http_application
+  test_https_setup_writes_random_admin_path_and_skips_reserved_acme_email
+  test_https_setup_stops_when_domain_points_elsewhere
+  test_https_setup_rejects_unresolved_domain
+  test_https_setup_warns_about_aaaa_record_not_on_this_server
+  test_setup_rejects_weak_admin_passwords_until_valid
+  test_setup_rejects_admin_username_with_spaces
+  test_setup_cancel_at_confirmation_writes_nothing
+  test_proxy_setup_binds_loopback_and_trusts_one_proxy
+  test_http_setup_rejects_busy_port_and_defaults_to_public_ip
+  test_setup_reconfigure_backs_up_and_keeps_session_secret
+  test_setup_reconfigure_can_be_declined
+  test_setup_aborts_when_input_ends
   test_update_archives_online_snapshot_only
   test_update_aborts_before_pull_when_backup_fails
   test_update_uses_configured_database_without_sqlite3_filename
