@@ -30,12 +30,15 @@ if [[ "$app_base_url" == https://* ]] && docker compose config --services | grep
   domain="${app_base_url#https://}"
   domain="${domain%%/*}"
   https_ready=false
-  # 首次申请证书可能需要一两分钟。
+  https_error=""
+  # 首次申请证书可能需要一两分钟，期间握手失败属正常，只在最终失败时显示错误。
+  echo "正在等待 HTTPS 证书签发（首次部署可能需要一两分钟）..."
   for ((attempt = 1; attempt <= 24; attempt++)); do
-    if curl --silent --show-error --fail --head \
+    if https_error="$(curl --silent --show-error --fail --head \
       --max-time 5 \
       --resolve "$domain:443:127.0.0.1" \
-      "https://$domain/"; then
+      --output /dev/null \
+      "https://$domain/" 2>&1)"; then
       https_ready=true
       break
     fi
@@ -43,6 +46,7 @@ if [[ "$app_base_url" == https://* ]] && docker compose config --services | grep
   done
   if [ "$https_ready" != true ]; then
     echo "HTTPS 尚未就绪，已达到等待上限。保留容器以便诊断。" >&2
+    echo "最后一次检查的错误：$https_error" >&2
     docker compose logs --tail=100 caddy >&2 || true
     echo "请运行 ./scripts/diagnose.sh 继续诊断。" >&2
     exit 1

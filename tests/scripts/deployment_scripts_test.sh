@@ -464,7 +464,7 @@ test_https_setup_reports_ready_after_https_check_succeeds() {
 
   assert_success
   assert_contains "$fixture/setup.out" '部署完成'
-  assert_line_count "$FAKE_CURL_LOG" '--silent --show-error --fail --head --max-time 5 --resolve card.example.test:443:127.0.0.1 https://card.example.test/' 1
+  assert_line_count "$FAKE_CURL_LOG" '--silent --show-error --fail --head --max-time 5 --resolve card.example.test:443:127.0.0.1 --output /dev/null https://card.example.test/' 1
   assert_not_contains "$FAKE_CURL_LOG" '--insecure'
   assert_not_contains "$FAKE_CURL_LOG" '-k'
 }
