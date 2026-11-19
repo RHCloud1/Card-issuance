@@ -295,9 +295,11 @@ chmod +x scripts/update.sh
 1. 检查当前目录是否为 Git 仓库
 2. 检查 `.env` 是否存在
 3. 通过运行中的应用容器生成 SQLite 一致性快照，再归档到 `backups/`
-4. `git pull --ff-only`
+4. `git pull --ff-only`（忽略文件权限差异）
 5. `docker compose up -d --build`
 6. 检查应用 HTTP 服务（内置 Caddy 模式同时验证 HTTPS）后清理无用 Docker 镜像
+
+2026-11-19 之前用一键脚本安装的，第一次更新若提示 `Your local changes to the following files would be overwritten by merge: scripts/check-ready.sh`，是旧版安装脚本改了文件权限所致，先执行一次 `git checkout -- scripts/check-ready.sh` 再运行 `./scripts/update.sh` 即可，之后不会再出现。
 
 备份失败或启动检查失败时脚本会返回非零退出码，不会报告更新成功。执行更新前应用容器需要处于运行状态；当前脚本不提供自动版本回滚。
 

@@ -569,6 +569,14 @@ test_diagnose_remains_read_only() {
   assert_not_contains "$FAKE_DOCKER_LOG" 'compose kill'
 }
 
+test_shell_scripts_are_committed_executable() {
+  # install.sh 不再 chmod；不可执行的脚本既无法直接运行，本地改权限后又会让 update.sh 的 git pull 中止。
+  git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  local not_executable
+  not_executable="$(git -C "$repo_root" ls-files -s -- 'scripts/*.sh' | awk '$1 != "100755" { print $4 }')"
+  [ -z "$not_executable" ] || fail "scripts must be committed as 100755: $not_executable"
+}
+
 test_maintenance_scripts_include_chinese_output_and_dns_diagnostics() {
   assert_contains "$repo_root/scripts/install.sh" '开始安装 Card Issuance'
   assert_contains "$repo_root/scripts/install-docker-ubuntu.sh" '开始安装 Docker'
@@ -801,7 +809,7 @@ test_update_archives_online_snapshot_only() {
   [ "$(tar -xOzf "${archives[0]}" data/card_issuance.sqlite3)" = 'SQLite snapshot fixture' ] \
     || fail 'archive did not contain the online snapshot'
   assert_contains "$FAKE_DOCKER_LOG" 'compose exec -T card-issuance python - --output -'
-  assert_contains "$FAKE_DOCKER_LOG" 'git pull --ff-only'
+  assert_contains "$FAKE_DOCKER_LOG" 'git -c core.fileMode=false pull --ff-only'
   assert_contains "$fixture/update.out" '更新完成'
 }
 
@@ -884,6 +892,7 @@ test_docker_installer_selects_matching_distribution() {
 trap cleanup_fixture EXIT
 
 tests=(
+  test_shell_scripts_are_committed_executable
   test_https_setup_generates_dns_configuration
   test_https_setup_rejects_third_party_port_443
   test_https_setup_allows_its_own_caddy_to_use_80_and_443

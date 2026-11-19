@@ -60,7 +60,8 @@ echo "数据库一致性备份已写入 $backup_path"
 cleanup_snapshot
 trap - EXIT
 
-git pull --ff-only
+# 只比较文件内容：旧版 install.sh 会 chmod +x 脚本，权限差异不应让更新中止。
+git -c core.fileMode=false pull --ff-only
 docker compose up -d --build
 
 app_base_url="$(get_env APP_BASE_URL)"

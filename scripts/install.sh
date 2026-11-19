@@ -60,7 +60,6 @@ else
 fi
 
 cd "$install_dir"
-chmod +x scripts/*.sh
 # 通过 curl ... | bash 运行时标准输入是脚本本身，交互问题改从终端读取。
 if [ ! -t 0 ] && [ -r /dev/tty ]; then
   ./scripts/setup.sh < /dev/tty
